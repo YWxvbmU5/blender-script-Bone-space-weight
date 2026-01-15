@@ -2,7 +2,7 @@ import bpy
 import re
 import math
 from mathutils import Vector, Euler, Quaternion  # 如果需要
-
+from collections import namedtuple
 # 注册属性名（保存到 Armature datablock）
 _PSD_CACHE_OBJ_PROP = "_psd_cache_obj"
 
@@ -14,6 +14,43 @@ PREFIX_RESULT_SCA = "psd_sca_"
 _psd_results_cache = {}
 
 #======================================================================
+
+def psd_selection_change_handler(scene, depsgraph):
+    """
+    系统回调：3D视图 -> UI列表同步
+    当活动骨骼改变时，自动跳转 UI 列表索引
+    """
+    # 获取当前上下文
+    context = bpy.context
+    obj = context.active_object
+    
+    # 只处理姿态模式下的骨架
+    if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
+        return
+
+    active_pb = obj.active_pose_bone
+    if not active_pb:
+        return
+
+    # 优化：如果当前列表索引对应的骨骼已经是选中的骨骼，直接跳过，节省计算
+    curr_idx = obj.psd_saved_pose_index
+    if 0 <= curr_idx < len(obj.psd_saved_poses):
+        if obj.psd_saved_poses[curr_idx].bone_name == active_pb.name:
+            return
+
+    # 寻找匹配的骨骼索引
+    for i, entry in enumerate(obj.psd_saved_poses):
+        if entry.bone_name == active_pb.name:
+            # 找到匹配项，更新索引
+            obj.psd_saved_pose_index = i
+            
+            # 强制刷新 UI 面板区域，防止显示延迟
+            for window in context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'PROPERTIES':
+                        area.tag_redraw()
+            break
+
 
 def psd_register_cache_empty(obj_arm: bpy.types.Object, empty_obj: bpy.types.Object, verbose=False) -> bool:
     """
@@ -152,60 +189,25 @@ def psd_flush_mem_to_registered_empty(obj_arm: bpy.types.Object, verbose=False) 
             print("[PSD] psd_flush_mem_to_registered_empty 错误:", e)
         return False
 
+#========获取当前选择条目的weight缓存结果==========
+PSDWeights = namedtuple('PSDWeights', ['rot', 'loc', 'sca'])
 
-def psd_set_result_datablock_empty_only(obj_arm, key, value, verbose=False):
-    """
-    优先写入用户注册的 Empty（如果注册了），否则回退到写入 Armature datablock（保留旧行为）。
-    尽量避免调用 update_tag() 以减少评估开销。
-    """
-    try:
-        fw = float(value)
-    except Exception:
-        return False
+def get_weight_cache(obj, entry):
+    arm_key = _arm_key_for_obj(obj)
+    arm_cache = _psd_results_cache.get(arm_key, {})
 
-    # 优先写到注册的 empty（如果有）
-    try:
-        cache_obj = psd_get_registered_empty(obj_arm)
-        if cache_obj:
-            prev = cache_obj.get(key, None)
-            if prev is None or abs(prev - fw) > 1e-6:
-                cache_obj[key] = fw
-                if verbose:
-                    print(f"[PSD] 已写入注册 Empty '{cache_obj.name}': {key} = {fw}")
-                return True
-            #try:
-            #    cache_obj.update_tag()
-            #except Exception:
-            #    pass
-            return False
-    except Exception:
-        # 忽略并回退到 datablock 写入
-        pass
+    safe_bn = _safe_name(entry.bone_name)
+    safe_en = _safe_name(entry.name)
 
-    # 如果没有注册 Empty，则回退到写入 Armature datablock（原行为）
-    wrote = False
-    try:
-        arm_db = bpy.data.armatures.get(obj_arm.data.name)
-        if arm_db is not None:
-            prev = arm_db.get(key, None)
-            if prev is None or abs(prev - fw) > 1e-6:
-                arm_db[key] = fw
-                wrote = True
-                if verbose:
-                    print(f"[PSD] 已写入骨架数据块 '{arm_db.name}': {key} = {fw}")
-            #try:
-            #    arm_db.update_tag()
-            #except Exception:
-            #    pass
-            # 注意：不再显式调用 arm_db.update_tag()（避免强制 depsgraph 更新）
-    except Exception as e:
-        if verbose:
-            print("psd_set_result_datablock_only: 写入失败:", e)
-        return False
-    return wrote
+    rot_val = arm_cache.get(f"{PREFIX_RESULT}{safe_bn}_{safe_en}", 0.0)
+    loc_val = arm_cache.get(f"{PREFIX_RESULT_LOC}{safe_bn}_{safe_en}", 0.0)
+    sca_val = arm_cache.get(f"{PREFIX_RESULT_SCA}{safe_bn}_{safe_en}", 0.0)
 
+    # 返回命名元组
+    return PSDWeights(rot_val, loc_val, sca_val)
 
-#============================================================================
+#=====================================================
+
 
 def _arm_key_for_obj(obj_arm):
     try:
@@ -453,33 +455,6 @@ def _capture_bone_local_scale(arm_obj, bone_name, depsgraph=None):
     rest_sca = pb.scale.copy()  # 假设 rest 是默认 (1,1,1)，但实际捕捉当前作为 rest
     pose_sca = pb.scale.copy()
     return (rest_sca, pose_sca)
-
-def psd_set_result_datablock_only(obj_arm, key, value, verbose=False):
-    try:
-        fw = float(value)
-    except Exception:
-        return False
-
-    wrote = False
-    try:
-        arm_db = bpy.data.armatures.get(obj_arm.data.name)
-        if arm_db is not None:
-            prev = arm_db.get(key, None)
-            if prev is None or abs(prev - fw) > 1e-6:
-                arm_db[key] = fw
-                wrote = True
-                if verbose:
-                    print(f"[PSD] 已写入骨架数据块 '{arm_db.name}': {key} = {fw}")
-            try:
-                arm_db.update_tag()
-            except Exception:
-                pass
-    except Exception as e:
-        if verbose:
-            print("psd_set_result_datablock_only: 写入失败:", e)
-        return False
-    return wrote
-
 
 def bone_items(self, context):
     obj = context.object

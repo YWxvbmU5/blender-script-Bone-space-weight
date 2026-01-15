@@ -60,6 +60,7 @@ classes = (
     operators.PSD_OT_invalidate_cache,
     operators.PSD_OT_register_cache_empty_ui,
     operators.PSD_OT_unregister_cache_empty_ui,
+    operators.PSDApplySavePose,
     handlers.PSDStartOperator,
     handlers.PSDStopOperator,
 )

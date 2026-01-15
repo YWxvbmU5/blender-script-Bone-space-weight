@@ -2,10 +2,75 @@ import bpy
 import json
 import os
 import math
+from mathutils import Vector, Euler, Quaternion, Matrix
 from bpy_extras.io_utils import ImportHelper, ExportHelper
-from .utils import _safe_name, _get_selected_pair_bone, _capture_bone_local_rotation_deg, _capture_bone_local_translation, _capture_bone_local_scale, psd_register_cache_empty, psd_unregister_cache_empty  # 导入依赖
-from .core import psd_invalidate_bone_cache  # 导入核心函数
+from .utils import _safe_name, _get_selected_pair_bone, _capture_bone_local_rotation_deg, _capture_bone_local_translation, _capture_bone_local_scale, psd_register_cache_empty, psd_unregister_cache_empty, _arm_key_for_obj, psd_get_registered_empty  # 导入依赖
+from .utils import _PSD_CACHE_OBJ_PROP
+from .core import psd_invalidate_bone_cache, psd_clear_emply_results_cache  # 导入核心函数
 from .utils import PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA
+
+#=======apply=====
+class PSDApplySavePose(bpy.types.Operator):
+    bl_idname = "psd.apply_save_pose"
+    bl_label = "应用保存姿态到骨骼"
+
+    def execute(self, context):
+        arm = context.object
+        if not arm or arm.type != 'ARMATURE':
+            self.report({'ERROR'}, "请先选择一个骨架对象")
+            return {'CANCELLED'}
+
+        selected_bone_name = _get_selected_pair_bone(context)
+        if selected_bone_name == '<NONE>':
+            self.report({'ERROR'}, "请先在列表中选择一个骨骼")
+            return {'CANCELLED'}
+
+        # 1. 获取条目
+        entry = next((e for e in arm.psd_saved_poses if e.bone_name == selected_bone_name), None)
+        if not entry:
+            self.report({'ERROR'}, f"未找到骨骼 {selected_bone_name} 的保存条目")
+            return {'CANCELLED'}
+
+        pose_bone = arm.pose.bones.get(selected_bone_name)
+        if not pose_bone:
+            return {'CANCELLED'}
+
+        # --- 2. 应用位置 (Location) ---
+        if entry.has_loc:
+            pose_bone.location = Vector(entry.pose_loc)
+
+        # --- 3. 应用缩放 (Scale) ---
+        if entry.has_sca:
+            pose_bone.scale = Vector(entry.pose_scale)
+
+        # --- 4. 应用旋转 (Rotation) - 兼容所有模式 ---
+        if entry.has_rot:
+            # 1. 构造原始的 XYZ 欧拉对象
+            saved_euler = Euler((
+                math.radians(entry.pose_rot[0]),
+                math.radians(entry.pose_rot[1]),
+                math.radians(entry.pose_rot[2])
+            ), 'XYZ')
+
+            mode = pose_bone.rotation_mode
+            if mode == 'QUATERNION':
+                pose_bone.rotation_quaternion = saved_euler.to_quaternion()
+            elif mode == 'AXIS_ANGLE':
+                quat = saved_euler.to_quaternion()
+                pose_bone.rotation_axis_angle = quat.to_axis_angle()
+            else:
+                # 先转成矩阵，再用矩阵转成对应 mode 的欧拉角
+                # 这样可以自动处理所有的轴向顺序转换（如 ZYX, YXZ 等）
+                pose_bone.rotation_euler = saved_euler.to_matrix().to_euler(mode)
+
+        # 5. 更新视图
+        # context.view_layer.update()
+        
+        self.report({'INFO'}, f"已还原骨骼 {selected_bone_name} 的完整姿态")
+        return {'FINISHED'}
+
+
+#=======end=====
 
 class PSDExportConfig(bpy.types.Operator, ExportHelper):
     """导出当前骨架的 PSD 配置（包含每个 bone_pair 对应的所有条目）"""
@@ -674,45 +739,92 @@ class PSDRemoveSavedEntry(bpy.types.Operator):
         if not arm or arm.type != 'ARMATURE':
             self.report({'ERROR'}, "请先选择一个骨架")
             return {'CANCELLED'}
-        
         idx = arm.psd_saved_pose_index
         if idx < 0 or idx >= len(arm.psd_saved_poses):
             self.report({'ERROR'}, "未选择已保存的姿态")
             return {'CANCELLED'}
-        
+
         try:
-            # 获取要删除的条目
+            # 1. 获取要删除的条目数据
             entry = arm.psd_saved_poses[idx]
-            entry_key_rot = f"{PREFIX_RESULT}{_safe_name(entry.bone_name)}_{_safe_name(entry.name)}"
-            entry_key_loc = f"{PREFIX_RESULT_LOC}{_safe_name(entry.bone_name)}_{_safe_name(entry.name)}"
-            entry_key_sca = f"{PREFIX_RESULT_SCA}{_safe_name(entry.bone_name)}_{_safe_name(entry.name)}"
+            # 使用与 core.py 相同的 safe_name 逻辑构建属性 Key
+            safe_bn = _safe_name(entry.bone_name)
+            safe_en = _safe_name(entry.name)
             
-            # 改进1: 显式获取 Armature Datablock，与写入函数保持一致
-            arm_db = bpy.data.armatures.get(arm.data.name)
+            keys_to_delete = [
+                f"{PREFIX_RESULT}{safe_bn}_{safe_en}",
+                f"{PREFIX_RESULT_LOC}{safe_bn}_{safe_en}",
+                f"{PREFIX_RESULT_SCA}{safe_bn}_{safe_en}"
+            ]
 
-            if arm_db:
-                # 从数据块中安全地删除自定义属性
-                if entry_key_rot in arm_db:
-                    del arm_db[entry_key_rot]
-                if entry_key_loc in arm_db:
-                    del arm_db[entry_key_loc]
-                if entry_key_sca in arm_db:
-                    del arm_db[entry_key_sca]
+            # 2. 获取数据源：Armature Data 和 关联的 Empty
+            arm_db = arm.data  # 直接访问当前骨架的数据块
+            empty_obj = None
             
-            # 从UI列表对应的集合中移除该条目
+            # 从骨架数据中查找缓存的 Empty 名称或引用
+            empty_name = arm_db.get(_PSD_CACHE_OBJ_PROP, None)
+            if empty_name:
+                empty_obj = bpy.data.objects.get(empty_name)
+
+            # 3. 级联删除自定义属性
+            for key in keys_to_delete:
+                # 从 Armature 数据块中删除 (如果存在)
+                if key in arm_db:
+                    del arm_db[key]
+                
+                # 从 Empty 对象中删除 (如果存在)
+                if empty_obj and key in empty_obj:
+                    del empty_obj[key]
+
+            # 4. 从 UI 列表集合中移除
+            old_name = entry.name
             arm.psd_saved_poses.remove(idx)
-            
-            # 更新UI列表的选中索引
+
+            # 5. 更新索引，确保列表显示不会越界
             new_len = len(arm.psd_saved_poses)
-            arm.psd_saved_pose_index = min(max(0, idx - 1), new_len - 1) if new_len > 0 else -1
-            
-            self.report({'INFO'}, f"已移除条目 '{entry.name}'")
+            if new_len == 0:
+                arm.psd_saved_pose_index = -1
+            else:
+                # 如果删的是最后一个，索引减一；否则保持不变
+                if arm.psd_saved_pose_index >= new_len:
+                    arm.psd_saved_pose_index = new_len - 1
 
+            self.report({'INFO'}, f"已成功移除条目 '{old_name}' 及其关联属性")
+
+        except IndexError:
+            self.report({'ERROR'}, "删除失败：索引超出范围")
         except Exception as e:
-            # 改进2: 捕获所有潜在错误并报告，防止静默失败
-            self.report({'ERROR'}, f"移除条目时出错: {e}")
-            return {'CANCELLED'}
+            self.report({'ERROR'}, f"删除条目时发生意外错误: {str(e)}")
 
+        # try:
+        #     # 获取要删除的条目
+        #     entry = arm.psd_saved_poses[idx]
+        #     entry_key_rot = f"{PREFIX_RESULT}{_safe_name(entry.bone_name)}_{_safe_name(entry.name)}"
+        #     entry_key_loc = f"{PREFIX_RESULT_LOC}{_safe_name(entry.bone_name)}_{_safe_name(entry.name)}"
+        #     entry_key_sca = f"{PREFIX_RESULT_SCA}{_safe_name(entry.bone_name)}_{_safe_name(entry.name)}"
+           
+        #     #显式获取 Armature Datablock，与写入函数保持一致
+        #     arm_db = bpy.data.armatures.get(arm.data.name)
+        #     if arm_db:
+        #         # 从数据块中安全地删除自定义属性
+        #         if entry_key_rot in arm_db:
+        #             del arm_db[entry_key_rot]
+        #         if entry_key_loc in arm_db:
+        #             del arm_db[entry_key_loc]
+        #         if entry_key_sca in arm_db:
+        #             del arm_db[entry_key_sca]
+
+        #     # 从UI列表对应的集合中移除该条目
+        #     arm.psd_saved_poses.remove(idx)
+        #     # 更新UI列表的选中索引
+        #     new_len = len(arm.psd_saved_poses)
+        #     arm.psd_saved_pose_index = min(max(0, idx - 1), new_len - 1) if new_len > 0 else -1
+        #     self.report({'INFO'}, f"已移除条目 '{entry.name}'")
+
+        # except Exception as e:
+        #     # 改进2: 捕获所有潜在错误并报告，防止静默失败
+        #     self.report({'ERROR'}, f"移除条目时出错: {e}")
+        #     return {'CANCELLED'}
         return {'FINISHED'}
 
 class PSD_OT_AddTrigger(bpy.types.Operator):
@@ -739,26 +851,92 @@ class PSD_OT_AddTrigger(bpy.types.Operator):
 class PSD_OT_RemoveTrigger(bpy.types.Operator):
     bl_idname = "psd.remove_trigger"
     bl_label = "Remove Trigger"
+    bl_options = {'REGISTER', 'UNDO'}
+
     def execute(self, context):
         arm = context.object
+        if not arm or arm.type != 'ARMATURE':
+            return {'CANCELLED'}
+            
         idx = arm.psd_trigger_index
-        if not arm or idx < 0 or idx >= len(arm.psd_triggers):
+        if idx < 0 or idx >= len(arm.psd_triggers):
             return {'CANCELLED'}
-        #UI更新
+
+        # 获取常量前缀和安全名称工具（确保已在文件头部导入）
+        from .utils import _safe_name, PREFIX_RESULT_LOC, _PSD_CACHE_OBJ_PROP
+
         try:
-            key = arm.psd_triggers[idx]
-            key_base = f"{PREFIX_RESULT_LOC}{_safe_name(key.target_bone)}_{_safe_name(key.name)}_w"
-            arm_db = bpy.data.armatures.get(arm.data.name)
-            if arm_db:
-                if key_base in arm_db:
-                    print("success del " + key_base)
-                    del arm_db[key_base]
+            # 1. 获取要删除的条目
+            trig = arm.psd_triggers[idx]
+            old_name = trig.name
+            
+            # 2. 构建属性 Key (需与 compute_triggers 中的命名规则完全一致)
+            # 注意：如果你的触发器结果 key 带有后缀 "_w"，请确保此处匹配
+            key_base = f"{PREFIX_RESULT_LOC}{_safe_name(trig.target_bone)}_{_safe_name(trig.name)}_w"
+            
+            # 3. 获取数据源
+            arm_db = arm.data
+            empty_obj = None
+            
+            # 从骨架数据中查找关联的 Empty
+            empty_name = arm_db.get(_PSD_CACHE_OBJ_PROP, None)
+            if empty_name:
+                empty_obj = bpy.data.objects.get(empty_name)
+
+            # 4. 级联删除自定义属性
+            # 从 Armature Data 删除
+            if key_base in arm_db:
+                del arm_db[key_base]
+                print(f"PSD Debug: 已从 Armature 删除 {key_base}")
+            
+            # 从 Empty 对象删除
+            if empty_obj and key_base in empty_obj:
+                del empty_obj[key_base]
+                print(f"PSD Debug: 已从 Empty 删除 {key_base}")
+
+            # 5. 从集合中移除条目
             arm.psd_triggers.remove(idx)
-            arm.psd_trigger_index = min(max(0, idx-1), len(arm.psd_triggers)-1)
+            
+            # 6. 更新 UI 列表索引
+            new_len = len(arm.psd_triggers)
+            if new_len == 0:
+                arm.psd_trigger_index = -1
+            else:
+                # 保持选中合理的索引位置
+                if arm.psd_trigger_index >= new_len:
+                    arm.psd_trigger_index = new_len - 1
+            
+            self.report({'INFO'}, f"已移除触发器 '{old_name}'")
+
         except Exception as e:
-            self.report({'ERROR'}, f"移除条目时出错: {e}")
+            self.report({'ERROR'}, f"移除触发器时出错: {str(e)}")
             return {'CANCELLED'}
+
         return {'FINISHED'}
+
+# class PSD_OT_RemoveTrigger(bpy.types.Operator):
+#     bl_idname = "psd.remove_trigger"
+#     bl_label = "Remove Trigger"
+#     def execute(self, context):
+#         arm = context.object
+#         idx = arm.psd_trigger_index
+#         if not arm or idx < 0 or idx >= len(arm.psd_triggers):
+#             return {'CANCELLED'}
+#         #UI更新
+#         try:
+#             key = arm.psd_triggers[idx]
+#             key_base = f"{PREFIX_RESULT_LOC}{_safe_name(key.target_bone)}_{_safe_name(key.name)}_w"
+#             arm_db = bpy.data.armatures.get(arm.data.name)
+#             if arm_db:
+#                 if key_base in arm_db:
+#                     print("success del " + key_base)
+#                     del arm_db[key_base]
+#             arm.psd_triggers.remove(idx)
+#             arm.psd_trigger_index = min(max(0, idx-1), len(arm.psd_triggers)-1)
+#         except Exception as e:
+#             self.report({'ERROR'}, f"移除条目时出错: {e}")
+#             return {'CANCELLED'}
+#         return {'FINISHED'}
 
 class PSD_OT_SelectTriggerBone(bpy.types.Operator):
     bl_idname = "psd.select_trigger_bone"
@@ -950,10 +1128,13 @@ class PSD_OT_invalidate_cache(bpy.types.Operator):
     def execute(self, context):
         obj = context.object
         if obj and obj.type == 'ARMATURE':
-            psd_invalidate_bone_cache(obj.name)
+            arm_key = _arm_key_for_obj(obj)
+            psd_invalidate_bone_cache(arm_name=arm_key)
+            psd_clear_emply_results_cache(obj)
             self.report({'INFO'}, f"Cleared PSD cache for {obj.name}")
         else:
             psd_invalidate_bone_cache()
+            psd_clear_emply_results_cache()
             self.report({'INFO'}, "Cleared all PSD caches")
         return {'FINISHED'}
     

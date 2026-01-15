@@ -1,5 +1,11 @@
 import bpy
-from .utils import _get_selected_pair_bone, _get_selected_armature_name  # 导入辅助
+import gpu
+import math
+from mathutils import Vector, Matrix, Euler
+from gpu_extras.batch import batch_for_shader
+from .core import _psd_results_cache, _psd_perf_stats
+
+from .utils import _get_selected_pair_bone, _get_selected_armature_name, get_weight_cache  # 导入辅助
 from .operators import PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA
 from .core import (
     _psd_perf_stats,
@@ -7,6 +13,9 @@ from .core import (
     _pose_drivers_cache,
     _arm_key_for_obj
 )
+# =========================================================================
+#  Existing UI Classes
+# =========================================================================
 
 class PSDBonePairUIList(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
@@ -320,11 +329,13 @@ class PSDPanel(bpy.types.Panel):
                 col.operator('psd.remove_saved_entry', icon='REMOVE', text='')
 
                 # 选中条目详情
+                #检查索引有效性
                 if arm.psd_saved_poses and arm.psd_saved_pose_index >= 0 and arm.psd_saved_pose_index < len(arm.psd_saved_poses):
                     e = arm.psd_saved_poses[arm.psd_saved_pose_index]
                     if e.bone_name == selected_bone or selected_bone == '<NONE>':
                         subbox.prop(e, 'name', text="名称")
                         subbox.label(text=f"骨骼: {e.bone_name}")
+                        subbox.operator('psd.apply_save_pose', text='应用保存姿态')
 
                         # 旋转详情
                         if getattr(e, 'is_direct_channel', False):
@@ -336,7 +347,9 @@ class PSDPanel(bpy.types.Panel):
                             subbox.prop(e, 'has_rot', text='包含旋转')
                             subbox.prop(e, 'cone_enabled', text='锥形衰减')
                             if e.cone_enabled:
-                                subbox.prop(e, 'cone_angle', text='锥角 (度)')
+                                row_cone = subbox.row(align=True)
+                                row_cone.prop(e, 'show_cone', text='显示锥形衰减', icon='CONE')
+                                row_cone.prop(e, 'cone_angle', text='角度')
                                 subbox.prop(e, 'cone_axis', text='轴向')
                             # subbox.prop(e, 'rot_channel_mode', text='旋转通道模式')
 
@@ -347,7 +360,9 @@ class PSDPanel(bpy.types.Panel):
                         subbox.prop(e, 'has_loc', text='包含位置')
                         subbox.prop(e, 'loc_enabled', text='轴向衰减')
                         if e.loc_enabled:
-                            subbox.prop(e, 'loc_radius', text='半径')
+                            loc_sphere = subbox.row(align=True)
+                            loc_sphere.prop(e, 'show_sphere', text='显示衰减球体', icon='SPHERE')
+                            loc_sphere.prop(e, 'loc_radius', text='半径')
 
                         subbox.separator()
                         # 缩放详情
@@ -378,6 +393,7 @@ class PSDPanel(bpy.types.Panel):
                     box.prop(trig, "name")
                     box.label(text=f"触发骨骼: {trig.bone_name}")
                     box.prop(trig, "target_bone", text="目标骨骼")
+                    box.prop(trig, "show_sphere")
                     box.prop(trig, "radius")
                     box.prop(trig, "falloff")
                     roww = box.row()
@@ -405,7 +421,6 @@ class PSDPanel(bpy.types.Panel):
             # 1. 获取当前骨架的 Key (通常是 arm.name 或 _arm_key_for_obj)
             arm_key = _arm_key_for_obj(arm)
             # 从内存字典直接获取该骨架的所有结果数据
-            from .core import _psd_results_cache, _psd_perf_stats
             arm_results = _psd_results_cache.get(arm_key, {})
             
             # 获取性能统计数据

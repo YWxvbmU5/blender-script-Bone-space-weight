@@ -4,8 +4,8 @@ import bpy
 import time
 import math
 from mathutils import Vector, Euler, Quaternion # 导入依赖
-from .utils import _safe_name, _get_rest_matrix, _get_pose_matrix, _capture_bone_local_rotation_deg, _capture_bone_local_translation_effective, _capture_bone_local_scale, _is_animation_playing, psd_set_result_datablock_only, psd_set_result_cache_only, psd_get_results_for_arm, psd_set_result_datablock_empty_only, _arm_key_for_obj, psd_flush_mem_to_registered_empty  # 导入捕获函数（如果移动到 utils）
-from .utils import PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA, _psd_results_cache
+from .utils import _safe_name, _get_rest_matrix, _get_pose_matrix, _capture_bone_local_rotation_deg, _capture_bone_local_translation_effective, _capture_bone_local_scale, _is_animation_playing, psd_set_result_cache_only, psd_get_results_for_arm, _arm_key_for_obj, psd_flush_mem_to_registered_empty  # 导入捕获函数（如果移动到 utils）
+from .utils import PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA, _psd_results_cache, _PSD_CACHE_OBJ_PROP
 from .json_shape_driver import ShapeDriver
 from .json_pose_driver import PoseDriver
 from .math_utils import (
@@ -184,25 +184,142 @@ def init_globals():
     _psd_perf_stats = {}
     _psd_bone_state_cache = {}
 
+# def psd_invalidate_bone_cache(arm_name=None, bone_name=None):
+#     """
+#     清空缓存：
+#       - psd_invalidate_bone_cache()             -> 清空全部缓存
+#       - psd_invalidate_bone_cache(arm_name)     -> 清空某个 arm 的缓存
+#       - psd_invalidate_bone_cache(arm_name, bn) -> 清空某个 arm 下的某个骨骼缓存
+#     在添加/删除 saved entry、切换 arm、或手动需要强制刷新时调用。
+#     """
+#     global _psd_bone_state_cache
+#     if arm_name is None:
+#         _psd_bone_state_cache.clear()
+#         return
+#     arm_cache = _psd_bone_state_cache.get(arm_name)
+#     if not arm_cache:
+#         return
+#     if bone_name is None:
+#         _psd_bone_state_cache.pop(arm_name, None)
+#     else:
+#         arm_cache.pop(bone_name, None)
 def psd_invalidate_bone_cache(arm_name=None, bone_name=None):
     """
     清空缓存：
       - psd_invalidate_bone_cache()             -> 清空全部缓存
       - psd_invalidate_bone_cache(arm_name)     -> 清空某个 arm 的缓存
       - psd_invalidate_bone_cache(arm_name, bn) -> 清空某个 arm 下的某个骨骼缓存
-    在添加/删除 saved entry、切换 arm、或手动需要强制刷新时调用。
     """
-    global _psd_bone_state_cache
+    global _psd_bone_state_cache, _psd_results_cache, _psd_perf_stats
+    
+    print(f"[DEBUG] psd_invalidate_bone_cache called: arm_name={arm_name}, bone_name={bone_name}")
+    
+    # 1. 全局清理
     if arm_name is None:
         _psd_bone_state_cache.clear()
+        _psd_results_cache.clear()
+        _psd_perf_stats.clear()
+        print("[DEBUG] All caches cleared globally")
         return
-    arm_cache = _psd_bone_state_cache.get(arm_name)
-    if not arm_cache:
-        return
+
+    # 2. 清理特定 Armature 的缓存（完全删除该 arm 的所有记录）
     if bone_name is None:
+        print(_psd_results_cache)
         _psd_bone_state_cache.pop(arm_name, None)
-    else:
-        arm_cache.pop(bone_name, None)
+        _psd_results_cache.pop(arm_name, None)
+        _psd_perf_stats.pop(arm_name, None)
+        print(f"[DEBUG] All caches cleared for arm: {arm_name}")
+        return
+    
+    # 3. 清理特定骨骼相关缓存
+    cleaned = False
+    
+    # bone state cache
+    arm_state_cache = _psd_bone_state_cache.get(arm_name)
+    if arm_state_cache and bone_name in arm_state_cache:
+        arm_state_cache.pop(bone_name, None)
+        cleaned = True
+        print(f"[DEBUG] Removed bone state for {bone_name} in {arm_name}")
+    
+    # results cache
+    arm_res_cache = _psd_results_cache.get(arm_name)
+    if arm_res_cache:
+        # 先删纯 bone_name（兼容）
+        if arm_res_cache.pop(bone_name, None) is not None:
+            cleaned = True
+        
+        # 删除所有包含 bone_name 的 key
+        keys_to_remove = [k for k in list(arm_res_cache.keys()) if bone_name in k]
+        if keys_to_remove:
+            for k in keys_to_remove:
+                arm_res_cache.pop(k, None)
+            cleaned = True
+            print(f"[DEBUG] Removed {len(keys_to_remove)} result keys containing '{bone_name}' in {arm_name}")
+        
+        # 如果子字典完全空了，删除整个 arm entry（彻底清理）
+        if not arm_res_cache:
+            _psd_results_cache.pop(arm_name, None)
+            print(f"[DEBUG] Sub-cache empty, removed entire results entry for {arm_name}")
+    
+    # perf stats（如果也按 bone 存的话，可类似处理）
+    arm_perf = _psd_perf_stats.get(arm_name)
+    if arm_perf and bone_name in arm_perf:
+        arm_perf.pop(bone_name, None)
+        cleaned = True
+    
+    print(f"[DEBUG] After invalidate, results cache for {arm_name}: {_psd_results_cache.get(arm_name)}")
+    
+    if not cleaned:
+        print(f"[WARNING] No cache entries found to remove for {bone_name} in {arm_name}")
+            
+#清除Emply已存储的结果========
+def psd_clear_emply_results_cache(arm_obj):
+    """清除指定 armature 对应的 Empty 存储的 PSD 结果缓存"""
+    if not arm_obj or arm_obj.type != 'ARMATURE':
+        return
+
+    # 1. 获取 Empty 对象
+    empty_obj = None
+
+    # 直接从 armature data 获取存储的 Empty 名字
+    # 假设是用 arm_obj.data[_PSD_CACHE_OBJ_PROP] = empty.name 写入的
+    arm_db = arm_obj.data
+    empty_name = arm_db.get(_PSD_CACHE_OBJ_PROP, None)
+
+    if empty_name:
+        empty_obj = bpy.data.objects.get(empty_name)
+
+    # 2. 如果没找到，尝试从对象本身获取（双重保险）
+    if not empty_obj:
+        empty_name = arm_obj.get(_PSD_CACHE_OBJ_PROP, None)
+        if empty_name:
+            empty_obj = bpy.data.objects.get(empty_name)
+
+    # 3. 执行清除逻辑
+    if not empty_obj:
+        print(f"[PSD] 警告：未找到关联的 Empty 对象，无法清除属性（骨架: {arm_obj.name}）")
+        return
+
+    # 4. 获取所有匹配前缀的 Key
+    keys_to_remove = [
+        key for key in empty_obj.keys() 
+        if key.startswith(PREFIX_RESULT) or 
+           key.startswith(PREFIX_RESULT_LOC) or 
+           key.startswith(PREFIX_RESULT_SCA)
+    ]
+
+    # 5. 删除自定义属性
+    removed_count = 0
+    for key in keys_to_remove:
+        try:
+            del empty_obj[key]
+            removed_count += 1
+        except Exception:
+            pass
+            
+    print(f"[PSD] 成功清除 Empty ({empty_obj.name}) 中的 {removed_count} 条缓存结果")
+
+
 
 def _psd_make_sample_from_maps(rot_map, loc_map, sca_map, bn, round_ndigits=6):
     """

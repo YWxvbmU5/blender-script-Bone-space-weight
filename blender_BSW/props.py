@@ -36,6 +36,7 @@ class PSDSavedPose(bpy.types.PropertyGroup):
 
     # 旋转的锥形衰减 (现有行为)
     cone_enabled: bpy.props.BoolProperty(name="锥形衰减", default=False)
+    show_cone: bpy.props.BoolProperty(name="显示锥形", default=False)
     cone_angle: bpy.props.FloatProperty(name="锥角 (度)", default=60.0, min=0.0, max=180.0)
     cone_axis: bpy.props.EnumProperty(
         name="锥体轴向",
@@ -48,6 +49,7 @@ class PSDSavedPose(bpy.types.PropertyGroup):
     rest_loc: bpy.props.FloatVectorProperty(name="静止位置", size=3, default=(0.0,0.0,0.0))
     pose_loc: bpy.props.FloatVectorProperty(name="姿态位置", size=3, default=(0.0,0.0,0.0))
     has_loc: bpy.props.BoolProperty(name="包含位移", default=False)
+    show_sphere: bpy.props.BoolProperty(name="显示衰减球体", default=False)
     loc_enabled: bpy.props.BoolProperty(name="启用位移衰减", default=False)
     loc_radius: bpy.props.FloatProperty(name="位移半径", default=0.1, min=0.0, soft_max=10.0)
 
@@ -73,6 +75,7 @@ class PSDBoneTrigger(bpy.types.PropertyGroup):
     target_bone: bpy.props.StringProperty(name="Target Bone", default="")    # 被检测的目标骨骼
     enabled: bpy.props.BoolProperty(name="Enabled", default=True)
     radius: bpy.props.FloatProperty(name="Radius", default=0.2, min=0.0, description="Trigger radius (world units)")
+    show_sphere: bpy.props.BoolProperty(name="显示衰减球体", default=False)
     # 可选：是否线性/平滑衰减（enum），当前仅用线性
     falloff: bpy.props.EnumProperty(
         name="Falloff",
@@ -99,12 +102,36 @@ class PSDPoseDriverFile(bpy.types.PropertyGroup):
         description="Pose Driver JSON 文件路径"
     )
 
+def update_psd_selection(self, context):
+    
+    obj = self # 如果定义在 Object 上，self 就是该物体
+    
+    # 检查索引是否有效
+    if obj.psd_bone_pairs_index < 0 or obj.psd_bone_pairs_index >= len(obj.psd_bone_pairs):
+        return
+
+    entry = obj.psd_bone_pairs[obj.psd_bone_pairs_index]
+
+    # 切换选中骨骼逻辑
+    if obj.mode == 'POSE':
+        for pb in obj.pose.bones:
+            pb.bone.select = False
+            
+        target_pb = obj.pose.bones.get(entry.bone_name)
+        if target_pb:
+            target_pb.bone.select = True
+            obj.data.bones.active = target_pb.bone # 设置为活动骨骼
+
 def register_props():
     # 注册属性到 bpy.types.Object 和 bpy.types.Scene
     bpy.types.Object.psd_saved_poses = bpy.props.CollectionProperty(type=PSDSavedPose)
     bpy.types.Object.psd_saved_pose_index = bpy.props.IntProperty(default=-1)
     bpy.types.Object.psd_bone_pairs = bpy.props.CollectionProperty(type=PSDBonePair)
-    bpy.types.Object.psd_bone_pairs_index = bpy.props.IntProperty(default=0)
+    bpy.types.Object.psd_bone_pairs_index = bpy.props.IntProperty(
+        name="Bone Pair Index",
+        default=0,
+        update=update_psd_selection
+        )
     bpy.types.Object.psd_triggers = bpy.props.CollectionProperty(type=PSDBoneTrigger)
     bpy.types.Object.psd_trigger_index = bpy.props.IntProperty(default=-1)
     

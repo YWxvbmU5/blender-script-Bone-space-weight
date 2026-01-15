@@ -2,10 +2,48 @@ import bpy
 import bpy.app.handlers as handlers
 from .core import _psd_compute_all, last_compute_time  # 导入核心
 from .utils import _is_animation_playing
+from .GUI_draw import draw_psd_visualizers
+from .GUI_draw import register_draw_handler, unregister_draw_handler
 # 全局处理器标志
 _psd_timer_registered = False
 _msgbus_subscribed = False
 _msgbus_owner = object()
+
+
+@handlers.persistent
+def psd_selection_handler(scene, depsgraph):
+    context = bpy.context
+    # 尽量通过 view_layer 获取，这比 context.active_object 在回调中更稳
+    obj = context.view_layer.objects.active
+    
+    if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
+        return
+
+    # 核心修改：通过 armature data 获取活动骨骼
+    # 只要你在 3D 视图点选了骨骼，obj.data.bones.active 必然会有值
+    active_bone = obj.data.bones.active
+    if not active_bone:
+        return
+    
+    active_name = active_bone.name
+    # print(f"DEBUG: 真正活动的骨骼名是: {active_name}")
+
+    # 寻找并匹配 psd_bone_pairs
+    found_idx = -1
+    for i, pair in enumerate(obj.psd_bone_pairs):
+        if pair.bone_name == active_name:
+            found_idx = i
+            break
+    
+    if found_idx != -1 and obj.psd_bone_pairs_index != found_idx:
+        # 为了防止在回调中修改属性引发无限递归，可以加一个简单的静默判断
+        obj.psd_bone_pairs_index = found_idx
+        
+        # 强制 UI 刷新
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'PROPERTIES':
+                    area.tag_redraw()
 
 #
 def _get_scene_for_timer():
@@ -236,13 +274,34 @@ class PSDStopOperator(bpy.types.Operator):
 
 
 def register_handlers():
+
+
+    if not any(_handler_name_matches(h, psd_selection_handler.__name__) for h in handlers.depsgraph_update_post):
+        bpy.app.handlers.depsgraph_update_post.append(psd_selection_handler)
     # 添加处理器
     bpy.app.handlers.depsgraph_update_post.append(psd_depsgraph_handler)
     bpy.app.handlers.frame_change_post.append(psd_frame_handler)
     # 计时器注册（如果有）
     # ...
+    # if not hasattr(bpy.types.SpaceView3D, "_psd_draw_handler"):
+    #     bpy.types.SpaceView3D._psd_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+    #         draw_psd_visualizers, (), 'WINDOW', 'POST_VIEW'
+    #     )
+    if not hasattr(bpy.types.SpaceView3D, "_psd_draw_handler"):
+        bpy.types.SpaceView3D._psd_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+            draw_psd_visualizers, (), 'WINDOW', 'POST_VIEW'
+        )
 
 def unregister_handlers():
+
+
+    _remove_handlers_with_name(handlers.depsgraph_update_post, psd_selection_handler.__name__)
+
+    handler = getattr(bpy.types.SpaceView3D, "_psd_draw_handler", None)
+    if handler is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(handler, 'WINDOW')
+        del bpy.types.SpaceView3D._psd_draw_handler
+
     try:
         _remove_handlers_with_name(handlers.depsgraph_update_post, psd_depsgraph_handler.__name__)
     except Exception:
