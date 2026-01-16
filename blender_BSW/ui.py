@@ -152,7 +152,7 @@ class PSDPanel(bpy.types.Panel):
         row.label(text="骨骼过滤器", icon='BONE_DATA')
 
         if arm.show_psd_filter_settings:
-            box.label(text=f"已选骨骼对象: {selected_ARMATURE}", icon='INFO')
+            box.label(text=f"已选骨骼对象: {selected_ARMATURE}", icon='ARMATURE_DATA')
             row = box.row(align=True)
             row.template_list("PSDBonePairUIList", "psd_bone_pairs", arm, "psd_bone_pairs", arm, "psd_bone_pairs_index", rows=3)
             col = row.column(align=True)
@@ -267,14 +267,14 @@ class PSDPanel(bpy.types.Panel):
                 # 显示已选骨骼
                 box.label(text=f"已选骨骼: {selected_bone}", icon='INFO')
                 row = box.row(align=True)
-                row.operator('psd.capture_rest', icon='REW', text='静止旋转')
-                row.operator('psd.capture_rotation', icon='POSE_HLT', text='姿态旋转')
+                row.operator('psd.capture_rest', icon='CON_ROTLIMIT', text='静止旋转')
+                row.operator('psd.capture_rotation', icon='CON_ROTLIKE', text='姿态旋转')
                 row = box.row(align=True)
-                row.operator('psd.capture_loc_rest', icon='EMPTY_AXIS', text='静止位置')
-                row.operator('psd.capture_location', icon='EMPTY_DATA', text='姿态位置')
+                row.operator('psd.capture_loc_rest', icon='CON_LOCLIMIT', text='静止位置')
+                row.operator('psd.capture_location', icon='CON_LOCLIKE', text='姿态位置')
                 row = box.row(align=True)
-                row.operator('psd.capture_sca_rest', icon='EMPTY_AXIS', text='静止缩放')
-                row.operator('psd.capture_scale', icon='EMPTY_DATA', text='姿态缩放')
+                row.operator('psd.capture_sca_rest', icon='CON_SIZELIMIT', text='静止缩放')
+                row.operator('psd.capture_scale', icon='CON_SIZELIKE', text='姿态缩放')
 
             # 临时捕捉数据（collapsible）
             if scene.psd_show_captures:
@@ -307,13 +307,13 @@ class PSDPanel(bpy.types.Panel):
             if scene.psd_show_captures:
                 box.label(text="保存条目", icon='FILE_TICK')
                 row = box.row(align=True)
-                row.operator('psd.save_captured_rotation', text='旋转')
-                row.operator('psd.save_captured_location', text='位置')
-                row.operator('psd.save_captured_scale', text='缩放')
+                row.operator('psd.save_captured_rotation', text='旋转', icon='CON_ROTLIKE')
+                row.operator('psd.save_captured_location', text='位置', icon='CON_LOCLIKE')
+                row.operator('psd.save_captured_scale', text='缩放', icon='CON_SIZELIKE')
                 row = box.row(align=True)
-                row.operator('psd.record_channel_x', text="Record X")
-                row.operator('psd.record_channel_y', text="Record Y")
-                row.operator('psd.record_channel_z', text="Record Z")
+                row.operator('psd.record_channel_x', text="Record X", icon='AXIS_FRONT')
+                row.operator('psd.record_channel_y', text="Record Y", icon='AXIS_SIDE')
+                row.operator('psd.record_channel_z', text="Record Z", icon='AXIS_TOP')
 
             # 已保存姿态（collapsible）
             box = layout.box()
@@ -335,40 +335,41 @@ class PSDPanel(bpy.types.Panel):
                     if e.bone_name == selected_bone or selected_bone == '<NONE>':
                         subbox.prop(e, 'name', text="名称")
                         subbox.label(text=f"骨骼: {e.bone_name}")
-                        subbox.operator('psd.apply_save_pose', text='应用保存姿态')
+                        subbox.operator('psd.apply_save_pose', text='应用保存姿态', icon='POSE_HLT')
 
                         # 旋转详情
                         if getattr(e, 'is_direct_channel', False):
                             subbox.label(text=f"Direct Channel: {e.channel_axis}")
                             subbox.prop(e, 'record_rot_channel_mode', text='通道模式')
-                        else:
+                        if getattr(e, 'has_rot', False):
                             subbox.label(text=f"静止旋转: X={e.rest_rot[0]:.2f}°, Y={e.rest_rot[1]:.2f}°, Z={e.rest_rot[2]:.2f}°")
                             subbox.label(text=f"姿态旋转: X={e.pose_rot[0]:.2f}°, Y={e.pose_rot[1]:.2f}°, Z={e.pose_rot[2]:.2f}°")
-                            subbox.prop(e, 'has_rot', text='包含旋转')
+                            # subbox.prop(e, 'has_rot', text='包含旋转')
                             subbox.prop(e, 'cone_enabled', text='锥形衰减')
                             if e.cone_enabled:
                                 row_cone = subbox.row(align=True)
-                                row_cone.prop(e, 'show_cone', text='显示锥形衰减', icon='CONE')
+                                row_cone.prop(e, 'show_cone', text='显示锥形衰减(debug)', icon='CONE')
                                 row_cone.prop(e, 'cone_angle', text='角度')
                                 subbox.prop(e, 'cone_axis', text='轴向')
                             # subbox.prop(e, 'rot_channel_mode', text='旋转通道模式')
 
                         subbox.separator()
-                        # 位置详情
-                        subbox.label(text=f"静止位置: X={e.rest_loc[0]:.4f}, Y={e.rest_loc[1]:.4f}, Z={e.rest_loc[2]:.4f}")
-                        subbox.label(text=f"姿态位置: X={e.pose_loc[0]:.4f}, Y={e.pose_loc[1]:.4f}, Z={e.pose_loc[2]:.4f}")
-                        subbox.prop(e, 'has_loc', text='包含位置')
-                        subbox.prop(e, 'loc_enabled', text='轴向衰减')
-                        if e.loc_enabled:
-                            loc_sphere = subbox.row(align=True)
-                            loc_sphere.prop(e, 'show_sphere', text='显示衰减球体', icon='SPHERE')
-                            loc_sphere.prop(e, 'loc_radius', text='半径')
+                        if getattr(e, 'has_loc', False):
+                            subbox.label(text=f"静止位置: X={e.rest_loc[0]:.4f}, Y={e.rest_loc[1]:.4f}, Z={e.rest_loc[2]:.4f}")
+                            subbox.label(text=f"姿态位置: X={e.pose_loc[0]:.4f}, Y={e.pose_loc[1]:.4f}, Z={e.pose_loc[2]:.4f}")
+                            # subbox.prop(e, 'has_loc', text='包含位置')
+                            subbox.prop(e, 'loc_enabled', text='轴向衰减')
+                            if e.loc_enabled:
+                                loc_sphere = subbox.row(align=True)
+                                loc_sphere.prop(e, 'show_sphere', text='显示衰减球体(debug)', icon='SPHERE')
+                                loc_sphere.prop(e, 'loc_radius', text='半径')
 
                         subbox.separator()
                         # 缩放详情
-                        subbox.label(text=f"静止缩放: X={e.rest_sca[0]:.4f}, Y={e.rest_sca[1]:.4f}, Z={e.rest_sca[2]:.4f}")
-                        subbox.label(text=f"姿态缩放: X={e.pose_sca[0]:.4f}, Y={e.pose_sca[1]:.4f}, Z={e.pose_sca[2]:.4f}")
-                        subbox.prop(e, 'has_sca', text='包含缩放')
+                        if getattr(e, 'has_sca', False):
+                            subbox.label(text=f"静止缩放: X={e.rest_sca[0]:.4f}, Y={e.rest_sca[1]:.4f}, Z={e.rest_sca[2]:.4f}")
+                            subbox.label(text=f"姿态缩放: X={e.pose_sca[0]:.4f}, Y={e.pose_sca[1]:.4f}, Z={e.pose_sca[2]:.4f}")
+                            # subbox.prop(e, 'has_sca', text='包含缩放')
 
 
             # 骨骼触发器（collapsible）
@@ -488,7 +489,8 @@ class PSDPanel(bpy.types.Panel):
             col = box.column(align=True)
             col.prop(scene, "psd_mode")
             col.prop(scene, "psd_perf_enabled")
-            
+            if scene.psd_mode in ('AUTO', 'FORCE_TIMER'):
+                box.prop(scene, "psd_idle_hz", text="空闲 Hz", slider=True)
             # --- 性能监控显示区 ---
             if scene.psd_perf_enabled:
                 perf_box = box.box() 

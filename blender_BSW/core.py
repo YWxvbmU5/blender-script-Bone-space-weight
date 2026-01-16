@@ -184,25 +184,6 @@ def init_globals():
     _psd_perf_stats = {}
     _psd_bone_state_cache = {}
 
-# def psd_invalidate_bone_cache(arm_name=None, bone_name=None):
-#     """
-#     清空缓存：
-#       - psd_invalidate_bone_cache()             -> 清空全部缓存
-#       - psd_invalidate_bone_cache(arm_name)     -> 清空某个 arm 的缓存
-#       - psd_invalidate_bone_cache(arm_name, bn) -> 清空某个 arm 下的某个骨骼缓存
-#     在添加/删除 saved entry、切换 arm、或手动需要强制刷新时调用。
-#     """
-#     global _psd_bone_state_cache
-#     if arm_name is None:
-#         _psd_bone_state_cache.clear()
-#         return
-#     arm_cache = _psd_bone_state_cache.get(arm_name)
-#     if not arm_cache:
-#         return
-#     if bone_name is None:
-#         _psd_bone_state_cache.pop(arm_name, None)
-#     else:
-#         arm_cache.pop(bone_name, None)
 def psd_invalidate_bone_cache(arm_name=None, bone_name=None):
     """
     清空缓存：
@@ -254,7 +235,7 @@ def psd_invalidate_bone_cache(arm_name=None, bone_name=None):
             for k in keys_to_remove:
                 arm_res_cache.pop(k, None)
             cleaned = True
-            print(f"[DEBUG] Removed {len(keys_to_remove)} result keys containing '{bone_name}' in {arm_name}")
+            # print(f"[DEBUG] Removed {len(keys_to_remove)} result keys containing '{bone_name}' in {arm_name}")
         
         # 如果子字典完全空了，删除整个 arm entry（彻底清理）
         if not arm_res_cache:
@@ -289,7 +270,7 @@ def psd_clear_emply_results_cache(arm_obj):
     if empty_name:
         empty_obj = bpy.data.objects.get(empty_name)
 
-    # 2. 如果没找到，尝试从对象本身获取（双重保险）
+    # 2. 尝试从对象本身获取
     if not empty_obj:
         empty_name = arm_obj.get(_PSD_CACHE_OBJ_PROP, None)
         if empty_name:
@@ -319,8 +300,6 @@ def psd_clear_emply_results_cache(arm_obj):
             
     print(f"[PSD] 成功清除 Empty ({empty_obj.name}) 中的 {removed_count} 条缓存结果")
 
-
-
 def _psd_make_sample_from_maps(rot_map, loc_map, sca_map, bn, round_ndigits=6):
     """
     从 bone_to_cur_rot / bone_to_cur_loc / bone_to_cur_sca 生成一个可比较的 sample。
@@ -343,7 +322,6 @@ def _psd_make_sample_from_maps(rot_map, loc_map, sca_map, bn, round_ndigits=6):
     loc_t = _to_tuple(loc_map.get(bn))
     sca_t = _to_tuple(sca_map.get(bn))
     return (loc_t, rot_t, sca_t)
-
 
 def _psd_samples_equal(s1, s2, eps=1e-5):
     """

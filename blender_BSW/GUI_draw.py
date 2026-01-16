@@ -99,7 +99,81 @@ def _generate_cone_geometry(angle_deg, axis='Y', length=0.5, segments=32):
     draw_verts.append(center_end)
     
     return draw_verts
+
+def _generate_spherical_sector_geometry(angle_deg, axis='Y', length=0.5, segments=32):
+    """
+    生成球扇形线框 (Spherical Sector)
+    支持 0 到 180 度，解决圆锥在 90 度时的塌陷问题
+    """
+    angle_rad = math.radians(angle_deg)
+    # 限制极小值防止奇点，上限可以到 180
+    angle_rad = max(0.01, min(math.pi, angle_rad))
+    
+    draw_verts = []
+    apex = Vector((0, 0, 0))
+    
+    # 1. 生成基础旋转矩阵 (对齐轴向)
+    # 默认计算是在 +Y 方向进行的
+    rot_mat = Matrix.Identity(3)
+    if axis == 'X':
+        rot_mat = Euler((0, 0, math.radians(-90)), 'XYZ').to_matrix()
+    elif axis == 'Z':
+        rot_mat = Euler((math.radians(90), 0, 0), 'XYZ').to_matrix()
+
+    # 2. 生成底部的“纬线”圆环 (The Ring at the edge of the sector)
+    # 这个环代表了衰减的最远边界
+    ring_radius = length * math.sin(angle_rad)
+    ring_height = length * math.cos(angle_rad)
+    
+    ring_points = []
+    for i in range(segments):
+        theta = 2.0 * math.pi * i / segments
+        # 在 XZ 平面上生成，高度在 Y
+        p = Vector((ring_radius * math.cos(theta), ring_height, ring_radius * math.sin(theta)))
+        ring_points.append(rot_mat @ p)
+
+    # 绘制圆环封闭线
+    for i in range(segments):
+        draw_verts.append(ring_points[i])
+        draw_verts.append(ring_points[(i + 1) % segments])
+
+    # 3. 生成从顶点到圆环的“经线” (Radiating Lines)
+    radial_steps = 8 
+    for i in range(radial_steps):
+        theta = 2.0 * math.pi * i / radial_steps
+        # 如果角度 <= 90, 连直线即可 (圆锥边)
+        # 如果角度 > 90, 连曲线（弧线）会更好看，但直线最节省性能
+        target_p = Vector((ring_radius * math.cos(theta), ring_height, ring_radius * math.sin(theta)))
+        draw_verts.append(apex)
+        draw_verts.append(rot_mat @ target_p)
+
+    # 4. 特殊处理：当角度 > 90 度时，增加“侧边弧线”增强立体感
+    # 否则看起来会像一个被切掉底部的球，很难分辨方向
+    if angle_deg > 59:
+        # 增加一根过轴心的纵向圆弧 (这里生成 4 根主要的弧线)
+        arc_segments = 16
+        for r in [0, math.pi/1]: # 两个垂直平面
+            last_p = None
+            for s in range(arc_segments + 1):
+                # t 从 0 扫到 angle_rad
+                t = angle_rad * s / arc_segments
+                p = Vector((length * math.sin(t) * math.cos(r), 
+                            length * math.cos(t), 
+                            length * math.sin(t) * math.sin(r)))
+                curr_p = rot_mat @ p
+                if last_p:
+                    draw_verts.append(last_p)
+                    draw_verts.append(curr_p)
+                last_p = curr_p
+
+    # 5. 轴心线 (可选，明确指向)
+    center_end = rot_mat @ Vector((0, length, 0))
+    draw_verts.append(apex)
+    draw_verts.append(center_end)
+
+    return draw_verts
 # =========================================================================
+
 
 def draw_psd_visualizers():
     context = bpy.context
@@ -116,7 +190,12 @@ def draw_psd_visualizers():
     arm_key = _arm_key_for_obj(obj)
     arm_cache = _psd_results_cache.get(arm_key, {})
 
+    gpu.state.line_width_set(1.0)      # 默认设为 1，避免继承大线宽
+    gpu.state.depth_test_set('LESS')   # 开启深度测试，解决遮挡混乱
+    gpu.state.blend_set('ALPHA')       # 确保透明度有效
+
     _shader.bind()
+
     obj_mat_world = obj.matrix_world  # 缓存矩阵引用
 
     # =========================================================================
@@ -223,7 +302,8 @@ def draw_psd_visualizers():
             final_cone_mat.translation = current_head_world
 
             viz_len = pb.length * 0.6 if pb.length > 0 else 0.5
-            verts = _generate_cone_geometry(entry.cone_angle, entry.cone_axis, length=viz_len)
+            verts = _generate_spherical_sector_geometry(entry.cone_angle, entry.cone_axis, length=viz_len)
+            # verts = _generate_cone_geometry(entry.cone_angle, entry.cone_axis, length=viz_len)
             
             world_verts = [final_cone_mat @ v for v in verts]
             cone_batch = batch_for_shader(_shader, 'LINES', {"pos": world_verts})

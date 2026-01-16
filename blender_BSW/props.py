@@ -49,7 +49,7 @@ class PSDSavedPose(bpy.types.PropertyGroup):
     rest_loc: bpy.props.FloatVectorProperty(name="静止位置", size=3, default=(0.0,0.0,0.0))
     pose_loc: bpy.props.FloatVectorProperty(name="姿态位置", size=3, default=(0.0,0.0,0.0))
     has_loc: bpy.props.BoolProperty(name="包含位移", default=False)
-    show_sphere: bpy.props.BoolProperty(name="显示衰减球体", default=False)
+    show_sphere: bpy.props.BoolProperty(name="显示衰减球体(debug)", default=False)
     loc_enabled: bpy.props.BoolProperty(name="启用位移衰减", default=False)
     loc_radius: bpy.props.FloatProperty(name="位移半径", default=0.1, min=0.0, soft_max=10.0)
 
@@ -162,7 +162,7 @@ def register_props():
     bpy.types.Scene.psd_running = bpy.props.BoolProperty(default=False)
 
     bpy.types.Scene.psd_mode = bpy.props.EnumProperty(
-        name="PSD 模式",
+        name="BSW 运行模式",
         description="AUTO(无实用价值(beta)): 根据播放状态自动切换; FORCE_PLAY(按动画播放器速率): 始终视为播放状态; FORCE_TIMER(推荐): 始终使用计时器采样",
         items=[
             ('AUTO', "自动 (检测)", "根据播放状态自动在播放/计时器模式间切换"),
@@ -195,20 +195,20 @@ def register_props():
     )
     
     bpy.types.Scene.psd_show_results = bpy.props.BoolProperty(
-        name="显示 PSD 结果",
-        description="在面板中显示存储在 armature.data 中的所有 PSD 结果（打开可能会影响 UI 性能）",
+        name="显示 BSW 结果",
+        description="在面板中显示存储在 armature.data 中的所有 BSW 结果（打开可能会影响 UI 性能）",
         default=False
     )
-    
-        # 搜索 / 排序 / 显示上限（用于 PSD 结果面板）
+
+        # 搜索 / 排序 / 显示上限（用于 BSW 结果面板）
     bpy.types.Scene.psd_results_search = bpy.props.StringProperty(
-        name="搜索 PSD 结果",
-        description="按 key 或短名搜索 PSD 结果（大小写不敏感）",
+        name="搜索 BSW 结果",
+        description="按 key 或短名搜索 BSW 结果（大小写不敏感）",
         default=""
     )
     bpy.types.Scene.psd_results_sort_by = bpy.props.EnumProperty(
         name="排序方式",
-        description="对 PSD 结果进行排序",
+        description="对 BSW 结果进行排序",
         items=[
             ('NAME', "名字", "按名字排序（短名）"),
         ],
@@ -228,10 +228,10 @@ def register_props():
     )
 
     bpy.types.Object.psd_output_mode = bpy.props.EnumProperty(
-        name="PSD 输出模式",
-        description="选择 PSD 计算结果的处理方式",
+        name="BSW 输出模式",
+        description="选择 BSW 计算结果的处理方式",
         items=[
-            ('STORE_TO_EMPTY', "存储到 Empty", "将 PSD 结果存储到注册的 Empty（同时应用 Drivers）"),
+            ('STORE_TO_EMPTY', "存储到 Empty", "将 BSW 结果存储到注册的 Empty（同时应用 Drivers）"),
             ('APPLY_DRIVERS', "仅应用 Drivers(beta)", "只根据 JSON Drivers 将结果应用到模型（不存储原始结果）需要json文件"),
         ],
         default='STORE_TO_EMPTY'
@@ -245,8 +245,8 @@ def register_props():
     bpy.types.Object.psd_pose_driver_files_index = bpy.props.IntProperty(default=-1)
 
     bpy.types.Object.show_psd_settings = bpy.props.BoolProperty(
-        name="显示 PSD 输出设置",
-        description="展开或折叠 PSD 输出详细设置",
+        name="显示 BSW 输出设置",
+        description="展开或折叠 BSW 输出详细设置",
         default=False
     )
 

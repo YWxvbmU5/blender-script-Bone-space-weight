@@ -9,6 +9,9 @@ from .utils import _PSD_CACHE_OBJ_PROP
 from .core import psd_invalidate_bone_cache, psd_clear_emply_results_cache  # 导入核心函数
 from .utils import PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA
 
+#同步 UI 列表结构
+
+
 #=======apply=====
 class PSDApplySavePose(bpy.types.Operator):
     bl_idname = "psd.apply_save_pose"

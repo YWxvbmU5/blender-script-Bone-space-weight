@@ -141,6 +141,41 @@ def psd_set_result_to_registered_empty(obj_arm: bpy.types.Object, key: str, valu
     return False
 
 
+def psd_flush_mem_to_array_optimized(obj_arm, verbose=False) -> bool:
+    arm_key = _arm_key_for_obj(obj_arm)
+    mem = _psd_results_cache.get(arm_key)
+    if not mem:
+        return False
+
+    cache_obj = psd_get_registered_empty(obj_arm)
+    
+    # 1. 获取或创建 IDProperty 数组
+    # 注意：Blender 的 IDProperty Array 必须初始化
+    if "psd_data" not in cache_obj:
+        cache_obj["psd_data"] = [0.0] * len(PSD_KEY_ORDER)
+
+    # 2. 从内存缓存同步到本地列表 (Python 内存操作，极快)
+    # 我们直接操作 list，最后再一次性交给 Blender
+    data_list = cache_obj["psd_data"].to_list()
+    is_dirty = False
+
+    for i, key in enumerate(PSD_KEY_ORDER):
+        if key in mem:
+            new_val = float(mem[key])
+            if abs(data_list[i] - new_val) > 0.0001:
+                data_list[i] = new_val
+                is_dirty = True
+
+    # 3. 关键一步：一次性写入！
+    if is_dirty:
+        # 这一行操作会触发一次性底层更新，而不是几百次小更新
+        cache_obj["psd_data"] = data_list
+        return True
+
+    return False
+
+#=====================================================
+
 def psd_flush_mem_to_registered_empty(obj_arm: bpy.types.Object, verbose=False) -> bool:
     """
     把当前内存缓存（_psd_results_cache）批量写回到已注册 Empty（一次性批量写入）。

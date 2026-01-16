@@ -70,14 +70,14 @@ def _psd_timer_func():
         try:
             _psd_compute_all(depsgraph=None)
         except Exception as e:
-            print("PSD计时器计算错误:", e)
+            print("BSW计时器计算错误:", e)
         hz = int(getattr(sc, 'psd_idle_hz', 10) or 10)
         if hz < 1:
             hz = 1
         return 1.0 / float(hz)
     except Exception as e:
         _psd_timer_registered = False
-        print("PSD计时器异常:", e)
+        print("BSW计时器异常:", e)
         return None
 
 def _on_play_changed():
@@ -108,7 +108,7 @@ def _on_play_changed():
                 except Exception:
                     pass
     except Exception as e:
-        print("PSD消息总线播放状态变化处理器异常:", e)
+        print("BSW消息总线播放状态变化处理器异常:", e)
 
 def _subscribe_msgbus_for_play_change():
     global _msgbus_subscribed
@@ -122,7 +122,7 @@ def _subscribe_msgbus_for_play_change():
         )
         _msgbus_subscribed = True
     except Exception as e:
-        print("PSD消息总线订阅失败:", e)
+        print("BSW消息总线订阅失败:", e)
         _msgbus_subscribed = False
 
 def _unsubscribe_msgbus():
@@ -166,7 +166,7 @@ def psd_frame_handler(scene):
         else:
             _psd_compute_all(depsgraph=None)
     except Exception as e:
-        print("PSD帧变化处理器错误:", e)
+        print("BSW帧变化处理器错误:", e)
 
 
 @handlers.persistent
@@ -179,12 +179,12 @@ def psd_depsgraph_handler(scene,depsgraph):
             return
         _psd_compute_all(depsgraph=depsgraph)
     except Exception as e:
-        print("PSD depsgraph处理器错误:", e)
+        print("BSW depsgraph处理器错误:", e)
 
 
 class PSDStartOperator(bpy.types.Operator):
     bl_idname = "object.psd_start"
-    bl_label = "启动PSD校正器"
+    bl_label = "启动BSW"
 
     def execute(self, context):
         global _msgbus_subscribed, _psd_timer_registered
@@ -230,15 +230,15 @@ class PSDStartOperator(bpy.types.Operator):
             elif mode == 'FORCE_PLAY':
                 _psd_timer_registered = False
 
-            self.report({'INFO'}, "PSD校正器已启动 (处理器已激活)")
+            self.report({'INFO'}, "BSW已启动 (处理器已激活)")
         else:
-            self.report({'INFO'}, "PSD校正器已在运行")
+            self.report({'INFO'}, "BSW已在运行")
         return {'FINISHED'}
 
 
 class PSDStopOperator(bpy.types.Operator):
     bl_idname = "object.psd_stop"
-    bl_label = "停止PSD校正器"
+    bl_label = "停止BSW"
 
     def execute(self, context):
         global _psd_timer_registered, _msgbus_subscribed
@@ -269,7 +269,7 @@ class PSDStopOperator(bpy.types.Operator):
         _psd_timer_registered = False
         _unsubscribe_msgbus()
 
-        self.report({'INFO'}, "PSD校正器已停止 (处理器已移除)")
+        self.report({'INFO'}, "BSW已停止 (处理器已移除)")
         return {'FINISHED'}
 
 
@@ -282,11 +282,7 @@ def register_handlers():
     bpy.app.handlers.depsgraph_update_post.append(psd_depsgraph_handler)
     bpy.app.handlers.frame_change_post.append(psd_frame_handler)
     # 计时器注册（如果有）
-    # ...
-    # if not hasattr(bpy.types.SpaceView3D, "_psd_draw_handler"):
-    #     bpy.types.SpaceView3D._psd_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
-    #         draw_psd_visualizers, (), 'WINDOW', 'POST_VIEW'
-    #     )
+
     if not hasattr(bpy.types.SpaceView3D, "_psd_draw_handler"):
         bpy.types.SpaceView3D._psd_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
             draw_psd_visualizers, (), 'WINDOW', 'POST_VIEW'
