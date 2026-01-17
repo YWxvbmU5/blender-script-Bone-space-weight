@@ -13,20 +13,26 @@ _msgbus_owner = object()
 @handlers.persistent
 def psd_selection_handler(scene, depsgraph):
     context = bpy.context
-    # 尽量通过 view_layer 获取，这比 context.active_object 在回调中更稳
+    # 在回调中使用 view_layer 获取活动对象最稳
     obj = context.view_layer.objects.active
     
     if not obj or obj.type != 'ARMATURE' or obj.mode != 'POSE':
         return
 
-    # 核心修改：通过 armature data 获取活动骨骼
-    # 只要你在 3D 视图点选了骨骼，obj.data.bones.active 必然会有值
+    # 获取当前选中的所有骨骼数量
+    selected_pose_bones = context.selected_pose_bones
+    
+    # 如果选中了多个骨骼（多选/框选），则不更新 UI 列表索引，直接退出
+    # 这样可以保留 Blender 原生的多选行为，不被索引切换干扰
+    if len(selected_pose_bones) != 1:
+        return
+
+    # 只要运行到这里，说明当前只选中了一个骨骼
     active_bone = obj.data.bones.active
     if not active_bone:
         return
     
     active_name = active_bone.name
-    # print(f"DEBUG: 真正活动的骨骼名是: {active_name}")
 
     # 寻找并匹配 psd_bone_pairs
     found_idx = -1
@@ -35,11 +41,12 @@ def psd_selection_handler(scene, depsgraph):
             found_idx = i
             break
     
+    # 只有当索引真的改变了才写入，减少 UI 刷新负担
     if found_idx != -1 and obj.psd_bone_pairs_index != found_idx:
-        # 为了防止在回调中修改属性引发无限递归，可以加一个简单的静默判断
+        # 修改索引
         obj.psd_bone_pairs_index = found_idx
         
-        # 强制 UI 刷新
+        # 强制属性面板刷新（使用 tag_redraw 比较轻量）
         for window in context.window_manager.windows:
             for area in window.screen.areas:
                 if area.type == 'PROPERTIES':
