@@ -17,7 +17,7 @@ from .core import (
 #  Existing UI Classes
 # =========================================================================
 
-class PSDBonePairUIList(bpy.types.UIList):
+class PSD_UL_BonePair(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         arm = context.object
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
@@ -37,7 +37,7 @@ class PSDBonePairUIList(bpy.types.UIList):
             layout.alignment = 'CENTER'
             layout.label(text="")
 
-class PSDSavedPoseUIList(bpy.types.UIList):
+class PSD_UL_SavedPose(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             txt = item.name
@@ -96,7 +96,7 @@ class PSDSavedPoseUIList(bpy.types.UIList):
         return filtered, new_order
 
 
-class PSDBoneTriggerUIList(bpy.types.UIList):
+class PSD_UL_BoneTrigger(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         # item 是 PSDBoneTrigger
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
@@ -108,7 +108,7 @@ class PSDBoneTriggerUIList(bpy.types.UIList):
             layout.label(text=item.name)
 
 
-class PSDShapeDriverFileUIList(bpy.types.UIList):
+class PSD_UL_ShapeDriverFile(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             layout.prop(item, "filepath", text="", emboss=False)
@@ -116,7 +116,7 @@ class PSDShapeDriverFileUIList(bpy.types.UIList):
             layout.alignment = 'CENTER'
             layout.label(text="")
 
-class PSDPoseDriverFileUIList(bpy.types.UIList):
+class PSD_UL_PoseDriverFile(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             layout.prop(item, "filepath", text="", emboss=False)
@@ -154,7 +154,7 @@ class PSDPanel(bpy.types.Panel):
         if arm.show_psd_filter_settings:
             box.label(text=f"已选骨骼对象: {selected_ARMATURE}", icon='ARMATURE_DATA')
             row = box.row(align=True)
-            row.template_list("PSDBonePairUIList", "psd_bone_pairs", arm, "psd_bone_pairs", arm, "psd_bone_pairs_index", rows=3)
+            row.template_list("PSD_UL_BonePair", "psd_bone_pairs", arm, "psd_bone_pairs", arm, "psd_bone_pairs_index", rows=3)
             col = row.column(align=True)
             col.operator('psd.add_bone_pair', icon='ADD', text='')
             col.operator('psd.remove_bone_pair', icon='REMOVE', text='')
@@ -225,7 +225,7 @@ class PSDPanel(bpy.types.Panel):
                 s_box = sub_box.box()
                 s_box.label(text="Shape Driver JSON", icon='SHAPEKEY_DATA')
                 row = s_box.row(align=True)
-                row.template_list("PSDShapeDriverFileUIList", "", arm, "psd_shape_driver_files", arm, "psd_shape_driver_files_index", rows=3)
+                row.template_list("PSD_UL_ShapeDriverFile", "", arm, "psd_shape_driver_files", arm, "psd_shape_driver_files_index", rows=3)
                 
                 col = row.column(align=True)
                 col.operator("psd.add_shape_driver_file", icon='ADD', text="")
@@ -237,7 +237,7 @@ class PSDPanel(bpy.types.Panel):
                 p_box = sub_box.box()
                 p_box.label(text="Pose Driver JSON", icon='CONSTRAINT_BONE')
                 row = p_box.row(align=True)
-                row.template_list("PSDPoseDriverFileUIList", "", arm, "psd_pose_driver_files", arm, "psd_pose_driver_files_index", rows=3)
+                row.template_list("PSD_UL_PoseDriverFile", "", arm, "psd_pose_driver_files", arm, "psd_pose_driver_files_index", rows=3)
                 
                 col = row.column(align=True)
                 col.operator("psd.add_pose_driver_file", icon='ADD', text="")
@@ -276,32 +276,33 @@ class PSDPanel(bpy.types.Panel):
                 row.operator('psd.capture_sca_rest', icon='CON_SIZELIMIT', text='静止缩放')
                 row.operator('psd.capture_scale', icon='CON_SIZELIKE', text='姿态缩放')
 
+            inner_box = box.box()
             # 临时捕捉数据（collapsible）
             if scene.psd_show_captures:
-                if scene.psd_temp_pose_bone:
-                    p = scene.psd_temp_pose
-                    box.label(text=f"旋转 (姿态): {scene.psd_temp_pose_bone} (X={p[0]:.2f}°, Y={p[1]:.2f}°, Z={p[2]:.2f}°)")
-                else:
-                    box.label(text='无旋转捕捉')
                 if scene.psd_temp_rest_bone:
                     r = scene.psd_temp_rest
-                    box.label(text=f"旋转 (静止): {scene.psd_temp_rest_bone} (X={r[0]:.2f}°, Y={r[1]:.2f}°, Z={r[2]:.2f}°)")
-                if scene.psd_temp_loc_bone:
-                    l = scene.psd_temp_loc
-                    box.label(text=f"位置 (姿态): {scene.psd_temp_loc_bone} (X={l[0]:.4f}, Y={l[1]:.4f}, Z={l[2]:.4f})")
+                    inner_box.label(text=f"旋转 (静止): {scene.psd_temp_rest_bone} (X={r[0]:.2f}°, Y={r[1]:.2f}°, Z={r[2]:.2f}°)")
+                if scene.psd_temp_pose_bone:
+                    p = scene.psd_temp_pose
+                    inner_box.label(text=f"旋转 (姿态): {scene.psd_temp_pose_bone} (X={p[0]:.2f}°, Y={p[1]:.2f}°, Z={p[2]:.2f}°)")
                 else:
-                    box.label(text='无位置捕捉')
+                    inner_box.label(text='无旋转捕捉')
                 if scene.psd_temp_loc_rest_bone:
                     lr = scene.psd_temp_loc_rest
-                    box.label(text=f"位置 (静止): {scene.psd_temp_loc_rest_bone} (X={lr[0]:.4f}, Y={lr[1]:.4f}, Z={lr[2]:.4f})")
-                if scene.psd_temp_sca_bone:
-                    s = scene.psd_temp_sca
-                    box.label(text=f"缩放 (姿态): {scene.psd_temp_sca_bone} (X={s[0]:.4f}, Y={s[1]:.4f}, Z={s[2]:.4f})")
+                    inner_box.label(text=f"位置 (静止): {scene.psd_temp_loc_rest_bone} (X={lr[0]:.4f}, Y={lr[1]:.4f}, Z={lr[2]:.4f})")
+                if scene.psd_temp_loc_bone:
+                    l = scene.psd_temp_loc
+                    inner_box.label(text=f"位置 (姿态): {scene.psd_temp_loc_bone} (X={l[0]:.4f}, Y={l[1]:.4f}, Z={l[2]:.4f})")
                 else:
-                    box.label(text='无缩放捕捉')
+                    inner_box.label(text='无位置捕捉')
                 if scene.psd_temp_sca_rest_bone:
                     sr = scene.psd_temp_sca_rest
-                    box.label(text=f"缩放 (静止): {scene.psd_temp_sca_rest_bone} (X={sr[0]:.4f}, Y={sr[1]:.4f}, Z={sr[2]:.4f})")
+                    inner_box.label(text=f"缩放 (静止): {scene.psd_temp_sca_rest_bone} (X={sr[0]:.4f}, Y={sr[1]:.4f}, Z={sr[2]:.4f})")
+                if scene.psd_temp_sca_bone:
+                    s = scene.psd_temp_sca
+                    inner_box.label(text=f"缩放 (姿态): {scene.psd_temp_sca_bone} (X={s[0]:.4f}, Y={s[1]:.4f}, Z={s[2]:.4f})")
+                else:
+                    inner_box.label(text='无缩放捕捉')
 
             # 保存按钮分组
             if scene.psd_show_captures:
@@ -324,7 +325,7 @@ class PSDPanel(bpy.types.Panel):
                 subbox = box.box()
                 subbox.label(text=f'骨骼 {bone_name} 的姿态条目:', icon='PRESET')
                 subrow = subbox.row()
-                subrow.template_list('PSDSavedPoseUIList', 'psd_saved_poses', arm, 'psd_saved_poses', arm, 'psd_saved_pose_index')
+                subrow.template_list('PSD_UL_SavedPose', 'psd_saved_poses', arm, 'psd_saved_poses', arm, 'psd_saved_pose_index')
                 col = subrow.column(align=True)
                 col.operator('psd.remove_saved_entry', icon='REMOVE', text='')
 
@@ -378,7 +379,7 @@ class PSDPanel(bpy.types.Panel):
             row.prop(scene, "psd_show_triggers", icon='ZOOM_IN' if scene.psd_show_triggers else 'ZOOM_OUT', text="骨骼触发器")
             if scene.psd_show_triggers:
                 subrow = box.row()
-                subrow.template_list("PSDBoneTriggerUIList", "psd_triggers", arm, "psd_triggers", arm, "psd_trigger_index", rows=4)
+                subrow.template_list("PSD_UL_BoneTrigger", "psd_triggers", arm, "psd_triggers", arm, "psd_trigger_index", rows=4)
                 col = subrow.column(align=True)
                 col.operator("psd.add_trigger", icon='ADD', text="")
                 col.operator("psd.remove_trigger", icon='REMOVE', text="")
