@@ -1,6 +1,7 @@
 import bpy
 import bpy.app.handlers as handlers
 from .handlers import _unsubscribe_msgbus, _remove_handlers_with_name, psd_depsgraph_handler, psd_frame_handler
+from .utils import update_direct_channel
 
 
 class PSDSavedPose(bpy.types.PropertyGroup):
@@ -21,6 +22,16 @@ class PSDSavedPose(bpy.types.PropertyGroup):
     rest_rot: bpy.props.FloatVectorProperty(name="静止旋转 (度)", size=3, default=(0.0,0.0,0.0))
     pose_rot: bpy.props.FloatVectorProperty(name="姿态旋转 (度)", size=3, default=(0.0,0.0,0.0))
     has_rot: bpy.props.BoolProperty(name="包含旋转", default=False)
+    use_rot_settings: bpy.props.BoolProperty(
+        name="启用旋转设置",
+        description="展开并允许修改旋转相关的详细参数",
+        default=False
+    )
+    is_editing: bpy.props.BoolProperty(
+        name="修改模式",
+        description="解锁数值输入，允许手动修改旋转数据",
+        default=False
+    )
     # 没什么用
     # rot_channel_mode: bpy.props.EnumProperty(
     #     name="旋转通道模式",
@@ -46,6 +57,8 @@ class PSDSavedPose(bpy.types.PropertyGroup):
     )
 
     # 位移通道
+    use_loc_settings: bpy.props.BoolProperty(name="展开位置设置", default=False)
+    is_editing_loc: bpy.props.BoolProperty(name="修改位置", default=False)
     rest_loc: bpy.props.FloatVectorProperty(name="静止位置", size=3, default=(0.0,0.0,0.0))
     pose_loc: bpy.props.FloatVectorProperty(name="姿态位置", size=3, default=(0.0,0.0,0.0))
     has_loc: bpy.props.BoolProperty(name="包含位移", default=False)
@@ -54,14 +67,25 @@ class PSDSavedPose(bpy.types.PropertyGroup):
     loc_radius: bpy.props.FloatProperty(name="位移半径", default=0.1, min=0.0, soft_max=10.0)
 
     # 缩放通道
+    use_sca_settings: bpy.props.BoolProperty(name="展开缩放设置", default=False)
+    is_editing_sca: bpy.props.BoolProperty(name="修改缩放", default=False)
     rest_sca: bpy.props.FloatVectorProperty(name="静止缩放", size=3, default=(1.0,1.0,1.0))
     pose_sca: bpy.props.FloatVectorProperty(name="姿态缩放", size=3, default=(1.0,1.0,1.0))
     has_sca: bpy.props.BoolProperty(name="包含缩放", default=False)
 
-    is_direct_channel: bpy.props.BoolProperty(name="Direct Channel Record", default=False)
+    is_direct_channel: bpy.props.BoolProperty(
+        name="直接通道模式",
+        description="启用后将直接提取骨骼的某一旋转轴数值，禁用复杂旋转计算",
+        default=False,
+        update=update_direct_channel  # 绑定回调函数
+    )
     channel_axis: bpy.props.EnumProperty(
         name="Channel Axis",
-        items=[('X', "X", ""), ('Y', "Y", ""), ('Z', "Z", "")],
+        items=[
+            ('X', "X 轴", "使用 X 轴旋转分量"),
+            ('Y', "Y 轴", "使用 Y 轴旋转分量"),
+            ('Z', "Z 轴", "使用 Z 轴旋转分量"),
+        ],
         default='X'
     )
 
@@ -155,8 +179,8 @@ def register_props():
     bpy.types.Scene.psd_temp_sca_bone = bpy.props.StringProperty(default='')
 
     #UI
-    bpy.types.Scene.psd_show_captures = bpy.props.BoolProperty(name="显示捕捉数据", default=True)
-    bpy.types.Scene.psd_show_triggers = bpy.props.BoolProperty(name="显示触发器", default=True)
+    bpy.types.Scene.psd_show_captures = bpy.props.BoolProperty(name="显示捕捉数据", default=False)
+    bpy.types.Scene.psd_show_triggers = bpy.props.BoolProperty(name="显示触发器", default=False)
     bpy.types.Scene.psd_show_saved_poses = bpy.props.BoolProperty(name="显示已保存姿态", default=True)
 
     bpy.types.Scene.psd_running = bpy.props.BoolProperty(default=False)

@@ -51,6 +51,7 @@ classes = (
     operators.PSDSaveCapturedLocationEntry,
     operators.PSDSaveCapturedScaleEntry,
     operators.PSDRemoveSavedEntry,
+    operators.PSDAddSavedEntry,
     operators.PSD_OT_AddTrigger,
     operators.PSD_OT_RemoveTrigger,
     operators.PSD_OT_SelectTriggerBone,
@@ -61,6 +62,7 @@ classes = (
     operators.PSD_OT_register_cache_empty_ui,
     operators.PSD_OT_unregister_cache_empty_ui,
     operators.PSDApplySavePose,
+    operators.PSDCapturePose,
     handlers.PSDStartOperator,
     handlers.PSDStopOperator,
 )

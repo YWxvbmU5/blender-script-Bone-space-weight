@@ -5,7 +5,7 @@ from mathutils import Vector, Matrix, Euler
 from gpu_extras.batch import batch_for_shader
 from .core import _psd_results_cache, _psd_perf_stats
 
-from .utils import _get_selected_pair_bone, _get_selected_armature_name, get_weight_cache  # 导入辅助
+from .utils import _get_selected_pair_bone, _get_selected_armature_name, get_weight_cache, update_direct_channel  # 导入辅助
 from .operators import PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA
 from .core import (
     _psd_perf_stats,
@@ -327,6 +327,7 @@ class PSDPanel(bpy.types.Panel):
                 subrow = subbox.row()
                 subrow.template_list('PSD_UL_SavedPose', 'psd_saved_poses', arm, 'psd_saved_poses', arm, 'psd_saved_pose_index')
                 col = subrow.column(align=True)
+                col.operator('psd.add_saved_entry', icon='ADD', text='')
                 col.operator('psd.remove_saved_entry', icon='REMOVE', text='')
 
                 # 选中条目详情
@@ -338,39 +339,198 @@ class PSDPanel(bpy.types.Panel):
                         subbox.label(text=f"骨骼: {e.bone_name}")
                         subbox.operator('psd.apply_save_pose', text='应用保存姿态', icon='POSE_HLT')
 
+                        row_main = subbox.row(align=True)
+                        icon_status_r = 'TRIA_RIGHT'
+                        text_status_r = "旋转通道配置"
+
+                        if e.use_rot_settings: 
+                            icon_status_r = 'TRIA_DOWN'
+                            text_status_r = "旋转通道配置"
+                            row_main.alert = False
+                        else:
+                            # 在收起状态下，根据模式显示不同的指示器
+                            if e.is_direct_channel:
+                                text_status_r = "旋转通道配置(直接旋转模式)"
+                                icon_status_r = 'FORWARD'
+                                row_main.alert = True
+                            elif e.has_rot:
+                                text_status_r = "旋转通道配置(默认旋转模式)"
+                                icon_status_r = 'CHECKMARK'
+                                row_main.alert = True
+                            
+                        row_main.prop(e, "use_rot_settings", 
+                                    text=text_status_r, 
+                                    icon=icon_status_r, 
+                                    toggle=True)
                         # 旋转详情
-                        if getattr(e, 'is_direct_channel', False):
-                            subbox.label(text=f"Direct Channel: {e.channel_axis}")
-                            subbox.prop(e, 'record_rot_channel_mode', text='通道模式')
-                        if getattr(e, 'has_rot', False):
-                            subbox.label(text=f"静止旋转: X={e.rest_rot[0]:.2f}°, Y={e.rest_rot[1]:.2f}°, Z={e.rest_rot[2]:.2f}°")
-                            subbox.label(text=f"姿态旋转: X={e.pose_rot[0]:.2f}°, Y={e.pose_rot[1]:.2f}°, Z={e.pose_rot[2]:.2f}°")
-                            # subbox.prop(e, 'has_rot', text='包含旋转')
-                            subbox.prop(e, 'cone_enabled', text='锥形衰减')
-                            if e.cone_enabled:
-                                row_cone = subbox.row(align=True)
-                                row_cone.prop(e, 'show_cone', text='显示锥形衰减(debug)', icon='CONE')
-                                row_cone.prop(e, 'cone_angle', text='角度')
-                                subbox.prop(e, 'cone_axis', text='轴向')
-                            # subbox.prop(e, 'rot_channel_mode', text='旋转通道模式')
+                        if e.use_rot_settings:
+                            rot_container = subbox.box()
+                            
+                            # 在容器最上方放置模式切换
+                            row_mode = rot_container.row(align=True)
+                            row_mode.prop(e, "is_direct_channel", text="直接通道模式", icon='FORWARD')
+                            
+                            # 分隔线，区分模式选择和具体参数
+                            rot_container.separator()
 
-                        subbox.separator()
-                        if getattr(e, 'has_loc', False):
-                            subbox.label(text=f"静止位置: X={e.rest_loc[0]:.4f}, Y={e.rest_loc[1]:.4f}, Z={e.rest_loc[2]:.4f}")
-                            subbox.label(text=f"姿态位置: X={e.pose_loc[0]:.4f}, Y={e.pose_loc[1]:.4f}, Z={e.pose_loc[2]:.4f}")
-                            # subbox.prop(e, 'has_loc', text='包含位置')
-                            subbox.prop(e, 'loc_enabled', text='轴向衰减')
+                            if e.is_direct_channel:
+                                
+                                inner_box = rot_container.box()
+                                col = inner_box.column(align=True)
+                                
+                                
+                                col.label(text="直接映射模式配置", icon='CON_TRANSFORM')
+                                col.separator() 
+
+                                
+                                param_col = inner_box.column() 
+                                param_col.prop(e, "channel_axis", text="驱动轴")
+                                param_col.separator()
+                                param_col.prop(e, 'record_rot_channel_mode', text="算法")
+                                
+                                
+                                inner_box.separator()
+                                
+                                # 锁定提示区
+                                row_lock = inner_box.row()
+                                row_lock.enabled = False
+                                row_lock.prop(e, 'has_rot', text='已由直接模式接管', icon='LOCKED')
+
+                                
+                                rot_container.separator()
+
+                            else:
+                                # 第一行：功能总控
+                                row = rot_container.row()
+                                row.prop(e, 'has_rot', text='参与计算') # 即使这里勾掉，UI也不会消失，只是逻辑上不参与
+                                row.prop(e, 'cone_enabled', text='锥形衰减')
+                                row.prop(e, "is_editing", text="", icon='DECORATE_UNLOCKED' if e.is_editing else 'DECORATE_LOCKED', toggle=True)
+                            
+                                # 第二行：数值修改区域
+                                col = rot_container.column(align=True)
+                                col.enabled = e.has_rot and e.is_editing  # 如果 has_rot 为 False，数值变灰但依然可见，防止UI跳动
+                                # --- 静止旋转行 ---
+                                row_rest = col.row(align=True)
+                                row_rest.prop(e, "rest_rot", text="静止旋转")
+                                if e.is_editing:
+                                    # 传入 target_type='REST'
+                                    op_rest = row_rest.operator("psd.capture_pose", text="", icon='EYEDROPPER')
+                                    op_rest.target_type, op_rest.channel = 'REST', 'ROT'
+
+                                # --- 姿态旋转行 ---
+                                row_pose = col.row(align=True)
+                                row_pose.prop(e, "pose_rot", text="姿态旋转")
+                                if e.is_editing:
+                                    # 传入 target_type='POSE'
+                                    op_pose = row_pose.operator("psd.capture_pose", text="", icon='EYEDROPPER')
+                                    op_pose.target_type, op_pose.channel = 'POSE', 'ROT'
+                                if not e.is_editing and e.has_rot:
+                                    rot_container.label(text="点击右上方小锁以修改数值", icon='INFO')
+                                # 第三行：锥形衰减细节
+                                if e.cone_enabled:
+                                    cone_box = rot_container.column(align=True)
+                                    row_cone = cone_box.row(align=True)
+                                    row_cone.prop(e, 'show_cone', text='显示衰减立体角(debug)', icon='CONE')
+                                    row_cone.prop(e, 'cone_angle', text='角度')
+                                    cone_box.separator()
+                                    cone_box.prop(e, 'cone_axis', text='轴向')
+
+                        row_loc = subbox.row(align=True)
+                        icon_status_l = 'TRIA_RIGHT'
+                        text_status_l = "位置通道配置"
+
+                        if e.use_loc_settings: 
+                            icon_status_l = 'TRIA_DOWN'
+                            text_status_l = "位置通道配置"
+                            row_loc.alert = False
+                        else:
+                            if e.has_loc:
+                                text_status_l = "位置通道配置(已启动)"
+                                icon_status_l = 'CHECKMARK'
+                                row_loc.alert = True
+                            
+                        row_loc.prop(e, "use_loc_settings", text=text_status_l, 
+                                    icon=icon_status_l, toggle=True)
+
+                        if e.use_loc_settings:
+                            loc_box = subbox.box()
+                            
+                            # 顶部控制行
+                            row_ctrl = loc_box.row(align=True)
+                            row_ctrl.prop(e, 'has_loc', text='参与计算')
+                            row_ctrl.prop(e, 'loc_enabled', text='轴向衰减')
+                            row_ctrl.prop(e, "is_editing_loc", text="", icon='DECORATE_UNLOCKED' if e.is_editing_loc else 'DECORATE_LOCKED', toggle=True)
+
+                            # 数值编辑区
+                            col = loc_box.column(align=True)
+                            col.enabled = e.has_loc and e.is_editing_loc
+                            
+                            # 静止位置 + 吸附
+                            r1 = col.row(align=True)
+                            r1.prop(e, "rest_loc", text="静止位置")
+                            if e.is_editing_loc:
+                                op = r1.operator("psd.capture_pose", text="", icon='EYEDROPPER')
+                                op.target_type, op.channel = 'REST', 'LOC'
+
+                            # 姿态位置 + 吸附
+                            r2 = col.row(align=True)
+                            r2.prop(e, "pose_loc", text="姿态位置")
+                            if e.is_editing_loc:
+                                op = r2.operator("psd.capture_pose", text="", icon='EYEDROPPER')
+                                op.target_type, op.channel = 'POSE', 'LOC'
+
+                            # 衰减球体设置
                             if e.loc_enabled:
-                                loc_sphere = subbox.row(align=True)
-                                loc_sphere.prop(e, 'show_sphere', text='显示衰减球体(debug)', icon='SPHERE')
-                                loc_sphere.prop(e, 'loc_radius', text='半径')
+                                sphere_box = loc_box.column(align=True)
+                                row_s = sphere_box.row(align=True)
+                                row_s.prop(e, 'show_sphere', text='显示衰减球体(debug)', icon='SPHERE')
+                                row_s.prop(e, 'loc_radius', text='半径')
 
-                        subbox.separator()
-                        # 缩放详情
-                        if getattr(e, 'has_sca', False):
-                            subbox.label(text=f"静止缩放: X={e.rest_sca[0]:.4f}, Y={e.rest_sca[1]:.4f}, Z={e.rest_sca[2]:.4f}")
-                            subbox.label(text=f"姿态缩放: X={e.pose_sca[0]:.4f}, Y={e.pose_sca[1]:.4f}, Z={e.pose_sca[2]:.4f}")
-                            # subbox.prop(e, 'has_sca', text='包含缩放')
+                    # subbox.separator()
+                    # 缩放详情
+                    # if getattr(e, 'has_sca', False):
+                        # --- 缩放通道配置 ---
+                        row_sca = subbox.row(align=True)
+                        icon_status_s = 'TRIA_RIGHT'
+                        text_status_s = "缩放通道配置"
+
+                        if e.use_loc_settings: 
+                            icon_status_s = 'TRIA_DOWN'
+                            text_status_s = "缩放通道配置"
+                            row_sca.alert = False
+                        else:
+                            if e.has_sca:
+                                text_status_s = "缩放通道配置(已启动)"
+                                icon_status_s = 'CHECKMARK'
+                                row_sca.alert = True
+                        row_sca.prop(e, "use_sca_settings", text=text_status_s, 
+                                    icon=icon_status_s, toggle=True)
+
+                        if e.use_sca_settings:
+                            sca_box = subbox.box()
+                            
+                            # 顶部控制行
+                            row_ctrl = sca_box.row(align=True)
+                            row_ctrl.prop(e, 'has_sca', text='参与计算')
+                            row_ctrl.prop(e, "is_editing_sca", text="", icon='DECORATE_UNLOCKED' if e.is_editing_sca else 'DECORATE_LOCKED', toggle=True)
+
+                            # 数值编辑区
+                            col = sca_box.column(align=True)
+                            col.enabled = e.has_sca and e.is_editing_sca
+                            
+                            # 静止缩放 + 吸附
+                            r1 = col.row(align=True)
+                            r1.prop(e, "rest_sca", text="静止缩放")
+                            if e.is_editing_sca:
+                                op = r1.operator("psd.capture_pose", text="", icon='EYEDROPPER')
+                                op.target_type, op.channel = 'REST', 'SCA'
+
+                            # 姿态缩放 + 吸附
+                            r2 = col.row(align=True)
+                            r2.prop(e, "pose_sca", text="姿态缩放")
+                            if e.is_editing_sca:
+                                op = r2.operator("psd.capture_pose", text="", icon='EYEDROPPER')
+                                op.target_type, op.channel = 'POSE', 'SCA'
 
 
             # 骨骼触发器（collapsible）

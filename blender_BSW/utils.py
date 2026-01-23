@@ -14,6 +14,15 @@ PREFIX_RESULT_SCA = "psd_sca_"
 _psd_results_cache = {}
 
 #======================================================================
+#UI
+def update_direct_channel(self, context):
+    """当切换直接通道模式时，自动处理参与计算开关"""
+    if self.is_direct_channel:
+        # 如果启动了直接通道，则关闭复杂的旋转计算开关
+        self.has_rot = False
+    else:
+        self.has_rot = True
+
 
 def psd_selection_change_handler(scene, depsgraph):
     """

@@ -11,6 +11,85 @@ from .utils import PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA
 
 #同步 UI 列表结构
 
+#=======CapturePose=====
+class PSDCapturePose(bpy.types.Operator):
+    bl_idname = "psd.capture_pose"
+    bl_label = "捕捉变换数据"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    # 必须明确定义这些属性，UI 传参才能生效
+    target_type: bpy.props.EnumProperty(
+        items=[('REST', "静止", ""), ('POSE', "姿态", "")]
+    )
+    channel: bpy.props.EnumProperty(
+        items=[
+            ('ROT', "旋转", ""), 
+            ('LOC', "位置", ""), 
+            ('SCA', "缩放", ""),
+        ],
+        default='ROT'
+    )
+
+    def execute(self, context):
+        arm = context.object
+        
+        selected_bone_name = _get_selected_pair_bone(context)
+        if selected_bone_name == '<NONE>':
+            self.report({'ERROR'}, "请先在列表中选择一个骨骼")
+            return {'CANCELLED'}
+        
+        idx = arm.psd_saved_pose_index
+        
+        if idx < 0 or idx >= len(arm.psd_saved_poses):
+             return {'CANCELLED'}
+
+        entry = arm.psd_saved_poses[idx]
+
+        pose_bone = arm.pose.bones.get(selected_bone_name)
+
+        if not pose_bone:
+            self.report({'ERROR'}, f"找不到骨骼: {selected_bone_name}")
+            return {'CANCELLED'}
+
+        # --- 分通道处理，确保不会串位 ---
+        
+        if self.channel == 'ROT':
+            # 旋转捕获：转换为 XYZ 欧拉度数
+            if pose_bone.rotation_mode == 'QUATERNION':
+                euler = pose_bone.rotation_quaternion.to_euler('XYZ')
+            elif pose_bone.rotation_mode == 'AXIS_ANGLE':
+                euler = pose_bone.rotation_axis_angle.to_euler('XYZ')
+            else:
+                euler = pose_bone.rotation_euler.to_matrix().to_euler('XYZ')
+            
+            rot_deg = (math.degrees(euler.x), math.degrees(euler.y), math.degrees(euler.z))
+            
+            if self.target_type == 'REST':
+                entry.rest_rot = rot_deg
+            else:
+                entry.pose_rot = rot_deg
+
+        elif self.channel == 'LOC':
+            # 位置捕获
+            loc_val = pose_bone.location.copy()
+            if self.target_type == 'REST':
+                entry.rest_loc = loc_val
+            else:
+                entry.pose_loc = loc_val
+
+        elif self.channel == 'SCA':
+            # 缩放捕获
+            sca_val = pose_bone.scale.copy()
+            if self.target_type == 'REST':
+                entry.rest_sca = sca_val
+            else:
+                entry.pose_sca = sca_val
+
+        # 强制界面刷新
+        context.area.tag_redraw()
+        
+        self.report({'INFO'}, f"已成功吸附 {selected_bone_name} 的 {self.channel} ({self.target_type})")
+        return {'FINISHED'}
 
 #=======apply=====
 class PSDApplySavePose(bpy.types.Operator):
@@ -29,10 +108,11 @@ class PSDApplySavePose(bpy.types.Operator):
             return {'CANCELLED'}
 
         # 1. 获取条目
-        entry = next((e for e in arm.psd_saved_poses if e.bone_name == selected_bone_name), None)
-        if not entry:
-            self.report({'ERROR'}, f"未找到骨骼 {selected_bone_name} 的保存条目")
-            return {'CANCELLED'}
+        idx = arm.psd_saved_pose_index
+        if idx < 0 or idx >= len(arm.psd_saved_poses):
+             return {'CANCELLED'}
+        
+        entry = arm.psd_saved_poses[idx]
 
         pose_bone = arm.pose.bones.get(selected_bone_name)
         if not pose_bone:
@@ -44,7 +124,7 @@ class PSDApplySavePose(bpy.types.Operator):
 
         # --- 3. 应用缩放 (Scale) ---
         if entry.has_sca:
-            pose_bone.scale = Vector(entry.pose_scale)
+            pose_bone.scale = Vector(entry.pose_sca)
 
         # --- 4. 应用旋转 (Rotation) - 兼容所有模式 ---
         if entry.has_rot:
@@ -71,8 +151,6 @@ class PSDApplySavePose(bpy.types.Operator):
         
         self.report({'INFO'}, f"已还原骨骼 {selected_bone_name} 的完整姿态")
         return {'FINISHED'}
-
-
 #=======end=====
 
 class PSDExportConfig(bpy.types.Operator, ExportHelper):
@@ -731,6 +809,58 @@ class PSDSaveCapturedScaleEntry(bpy.types.Operator):
             pass
 
         self.report({'INFO'}, f"已在骨架 {arm.name} 上为骨骼 {bone_name_sca} 保存缩放条目 '{new.name}'")
+        return {'FINISHED'}
+
+class PSDAddSavedEntry(bpy.types.Operator):
+    bl_idname = "psd.add_saved_entry"
+    bl_label = "添加空白条目"
+
+    entry_name: bpy.props.StringProperty(name="条目名称", default="default")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        arm = context.object
+        scene = context.scene
+        if not arm or arm.type != 'ARMATURE':
+            self.report({'ERROR'}, "请先选择一个骨架")
+            return {'CANCELLED'}
+
+        selected_bone = _get_selected_pair_bone(context)
+        if selected_bone == '<NONE>':
+            self.report({'ERROR'}, "骨骼过滤器中未选择骨骼。请先在骨骼过滤器列表中添加/选择一个骨骼。")
+            return {'CANCELLED'}
+        # 检查同名冲突
+        for existing in arm.psd_saved_poses:
+            if existing.name == self.entry_name:
+                self.report({'ERROR'}, f"条目名称 '{self.entry_name}' 已存在！")
+                return {'CANCELLED'}
+            
+        # 创建条目 (仅位移)
+        new = arm.psd_saved_poses.add()
+        new.name = self.entry_name if self.entry_name else "default"
+        new.bone_name = selected_bone if selected_bone != '<NONE>' else ""
+        new.is_direct_channel = False
+        # 旋转字段为空/禁用
+        new.rest_rot = (0.0,0.0,0.0)
+        new.pose_rot = (0.0,0.0,0.0)
+        new.has_rot = False
+        # 确保缩放字段为空/禁用
+        new.rest_sca = (0.0,0.0,0.0)
+        new.pose_sca = (0.0,0.0,0.0)
+        new.has_sca = False
+        # 设置位移字段
+        new.rest_loc = (0.0,0.0,0.0)
+        new.pose_loc = (0.0,0.0,0.0)
+        new.has_loc = False
+        # 保留默认衰减设置 (用户后续可编辑)
+        new.loc_enabled = getattr(new, 'loc_enabled', False)
+        new.loc_radius = getattr(new, 'loc_radius', 0.1)
+
+        arm.psd_saved_pose_index = len(arm.psd_saved_poses) - 1
+
+        self.report({'INFO'}, f"已成功添加条目: {self.entry_name}")
         return {'FINISHED'}
 
 class PSDRemoveSavedEntry(bpy.types.Operator):

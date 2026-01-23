@@ -408,7 +408,7 @@ def _psd_compute_all(arm=None, depsgraph=None, scene=None):
             except Exception:
                 continue
 
-            # bone_filter（和你原来逻辑一致）
+            # bone_filter
             bone_filter = None
             try:
                 if getattr(arm, "psd_bone_pairs", None) and len(arm.psd_bone_pairs) > 0:
@@ -432,7 +432,7 @@ def _psd_compute_all(arm=None, depsgraph=None, scene=None):
                 source_obj = arm
 
             for bn in bone_filter:
-                # 旋转（使用你原有的采样函数）
+                # 旋转
                 try:
                     cur_deg = _capture_bone_local_rotation_deg(arm, bn, depsgraph=depsgraph)
                     if cur_deg is not None:
