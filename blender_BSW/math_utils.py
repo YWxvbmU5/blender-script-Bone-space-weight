@@ -108,13 +108,23 @@ def compute_direct_channel_weight(
                 return max(-1.0, min(1.0, v))
 
             if ch_axis == 'X':
-                sx = _clamp1(swing_q.x)
-                w_deg = math.degrees(2.0 * math.asin(sx))
+                if mode == 'record_rot_SWING_X_TWIST':
+                    w_deg = _signed_angle_from_quat_acos(twist_q, twist_axis)
+                else:
+                    sx = _clamp1(swing_q.x)
+                    w_deg = math.degrees(2.0 * math.asin(sx))
             elif ch_axis == 'Y':
-                w_deg = _signed_angle_from_quat(twist_q, twist_axis)
+                if mode == 'record_rot_SWING_Y_TWIST':
+                    w_deg = _signed_angle_from_quat_acos(twist_q, twist_axis)
+                else:
+                    sy = _clamp1(swing_q.y)
+                    w_deg = math.degrees(2.0 * math.asin(sy))
             elif ch_axis == 'Z':
-                sz = _clamp1(swing_q.z)
-                w_deg = math.degrees(2.0 * math.asin(sz))
+                if mode == 'record_rot_SWING_Z_TWIST':
+                    w_deg = _signed_angle_from_quat_acos(twist_q, twist_axis)
+                else:
+                    sz = _clamp1(swing_q.z)
+                    w_deg = math.degrees(2.0 * math.asin(sz))
 
         w = math.radians(w_deg)
         if math.isnan(w):
