@@ -4,7 +4,7 @@ import bpy
 import time
 import math
 from mathutils import Vector, Euler, Quaternion # 导入依赖
-from .utils import _safe_name, _get_rest_matrix, _get_pose_matrix, _capture_bone_local_rotation_deg, _capture_bone_local_translation_effective, _capture_bone_local_scale, _is_animation_playing, psd_set_result_cache_only, psd_get_results_for_arm, _arm_key_for_obj, psd_flush_mem_to_registered_empty  # 导入捕获函数（如果移动到 utils）
+from .utils import _safe_name, _sync_cache_from_empty, psd_get_registered_empty, _get_rest_matrix, _get_pose_matrix, _capture_bone_local_rotation_deg, _capture_bone_local_translation_effective, _capture_bone_local_scale, _is_animation_playing, psd_set_result_cache_only, psd_get_results_for_arm, _arm_key_for_obj, psd_flush_mem_to_registered_empty  # 导入捕获函数（如果移动到 utils）
 from .utils import PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA, _psd_results_cache, _PSD_CACHE_OBJ_PROP
 from .json_shape_driver import ShapeDriver
 from .json_pose_driver import PoseDriver
@@ -386,6 +386,23 @@ def _psd_compute_all(arm=None, depsgraph=None, scene=None):
     DEBUG_CACHE = False
 
     for arm in [o for o in bpy.data.objects if o.type == 'ARMATURE']:
+
+        output_mode = getattr(arm, "psd_output_mode", 'STORE_TO_EMPTY')
+
+        if output_mode == 'DRIVERS_MODS':
+            arm_key = _arm_key_for_obj(arm)
+            
+            
+            if getattr(arm, "psd_triggers", None):
+                
+                compute_triggers(arm, psd_set_result_cache_only, PREFIX_RESULT_LOC, _safe_name)
+
+            # --- 后置同步与处理 ---
+            _sync_cache_from_empty(arm_key, psd_get_registered_empty(arm))
+            
+            continue 
+
+        
         # 每个 arm 的处理放在 try/finally 里以保证 arm perf 写回
         try:
             # 可靠的缓存 key（优先 as_pointer()，否则 id(arm)）
@@ -624,7 +641,7 @@ def _psd_compute_all(arm=None, depsgraph=None, scene=None):
 
                     # ================
 
-                elif mode == 'APPLY_DRIVERS':
+                elif mode == 'APPLY_DRIVERS_JSON':
                     flushed = True
                     # ==================== Shape Driver ====================
                     expressions = _shape_expressions_cache.get(arm_key)
