@@ -10,6 +10,18 @@ _msgbus_subscribed = False
 _msgbus_owner = object()
 
 
+
+@handlers.persistent
+def load_post_handler(dummy):
+    """每次打开文件后，强制重新注册驱动器函数"""
+    try:
+        from .driver_math import register_drivers
+        register_drivers()
+        print("✅ PSD 驱动器已在文件加载后自动修复注册")
+    except Exception as e:
+        print(f"❌ 自动修复注册失败: {e}")
+
+
 @handlers.persistent
 def psd_selection_handler(scene, depsgraph):
     context = bpy.context
@@ -283,12 +295,18 @@ class PSDStopOperator(bpy.types.Operator):
 def register_handlers():
 
 
+    if load_post_handler not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(load_post_handler)
+
+
     if not any(_handler_name_matches(h, psd_selection_handler.__name__) for h in handlers.depsgraph_update_post):
         bpy.app.handlers.depsgraph_update_post.append(psd_selection_handler)
     # 添加处理器
     bpy.app.handlers.depsgraph_update_post.append(psd_depsgraph_handler)
     bpy.app.handlers.frame_change_post.append(psd_frame_handler)
     # 计时器注册（如果有）
+
+    
 
     if not hasattr(bpy.types.SpaceView3D, "_psd_draw_handler"):
         bpy.types.SpaceView3D._psd_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
@@ -304,6 +322,10 @@ def unregister_handlers():
     if handler is not None:
         bpy.types.SpaceView3D.draw_handler_remove(handler, 'WINDOW')
         del bpy.types.SpaceView3D._psd_draw_handler
+
+    if load_post_handler in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(load_post_handler)
+
 
     try:
         _remove_handlers_with_name(handlers.depsgraph_update_post, psd_depsgraph_handler.__name__)
