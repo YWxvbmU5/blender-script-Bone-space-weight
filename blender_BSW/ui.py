@@ -209,7 +209,7 @@ class PSDPanel(bpy.types.Panel):
 
             elif arm.psd_output_mode == 'DRIVERS_MODS':
                 drive_box = sub_box
-                drive_box.label(text="驱动器接管模式 (高性能)", icon='DRIVER')
+                drive_box.label(text="驱动器接管", icon='DRIVER')
                 
                 cache_empty = psd_get_registered_empty(arm)
                 

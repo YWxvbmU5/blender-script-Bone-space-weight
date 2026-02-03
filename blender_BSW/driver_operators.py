@@ -31,7 +31,7 @@ def setup_rotation_driver(driver, arm, entry):
             target.transform_type = f'ROT_{ch_axis}'
         else:
             # 普通欧拉旋转
-            target.rotation_mode = 'AUTO_EULER'
+            target.rotation_mode = 'XYZ'
             target.transform_type = f'ROT_{ch_axis}'
             
         # 表达式非常简单，直接输出变量值 (弧度)
@@ -46,6 +46,7 @@ def setup_rotation_driver(driver, arm, entry):
             target = var.targets[0]
             target.id = arm
             target.bone_target = bone_name
+            target.rotation_mode = 'XYZ'
             target.transform_type = f'ROT_{ax}'
             target.transform_space = 'LOCAL_SPACE'
 
