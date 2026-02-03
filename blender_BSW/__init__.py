@@ -17,6 +17,8 @@ from . import core
 from . import operators
 from . import ui
 from . import handlers
+from . import driver_math
+from . import driver_operators
 
 classes = (
     props.PSDSavedPose,
@@ -63,11 +65,21 @@ classes = (
     operators.PSD_OT_unregister_cache_empty_ui,
     operators.PSDApplySavePose,
     operators.PSDCapturePose,
+    driver_operators.PSD_OT_BindDriverToCache,
+    driver_operators.PSD_OT_BatchBindAll,
+    driver_operators.PSD_OT_RemoveDriverFromCache,
+    driver_operators.PSD_OT_ClearAllCacheDrivers,
+    driver_operators.PSD_OT_RefreshDrivers,
+    driver_operators.PSD_OT_MuteDrivers,
+    driver_operators.PSD_OT_UnmuteDrivers,
     handlers.PSDStartOperator,
     handlers.PSDStopOperator,
 )
 
 def register():
+
+
+
 
     bpy.types.Scene.psd_cache_empty = bpy.props.PointerProperty(
         name="PSD Cache Empty",
