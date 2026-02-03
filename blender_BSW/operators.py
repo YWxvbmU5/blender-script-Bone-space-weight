@@ -837,7 +837,7 @@ class PSDAddSavedEntry(bpy.types.Operator):
                 self.report({'ERROR'}, f"条目名称 '{self.entry_name}' 已存在！")
                 return {'CANCELLED'}
             
-        # 创建条目 (仅位移)
+        # 创建条目
         new = arm.psd_saved_poses.add()
         new.name = self.entry_name if self.entry_name else "default"
         new.bone_name = selected_bone if selected_bone != '<NONE>' else ""

@@ -256,7 +256,8 @@ def register_props():
         description="选择 BSW 计算结果的处理方式",
         items=[
             ('STORE_TO_EMPTY', "存储到 Empty", "将 BSW 结果存储到注册的 Empty（同时应用 Drivers）"),
-            ('APPLY_DRIVERS', "仅应用 Drivers(beta)", "只根据 JSON Drivers 将结果应用到模型（不存储原始结果）需要json文件"),
+            ('DRIVERS_MODS', "仅blender驱动器", "由blender驱动器接管核心计算，除了骨骼触发器外"),
+            ('APPLY_DRIVERS_JSON', "仅应用 Drivers(beta)", "只根据 JSON Drivers 将结果应用到模型（不存储原始结果）需要json文件"),
         ],
         default='STORE_TO_EMPTY'
     )

@@ -123,6 +123,21 @@ def psd_get_registered_empty(obj_arm: bpy.types.Object):
         return None
     return bpy.data.objects.get(name)
 
+def _sync_cache_from_empty(arm_key, empty_obj):
+    """从 Empty 对象将驱动器计算出的实时结果拉回到 Python 缓存"""
+    if arm_key not in _psd_results_cache:
+        _psd_results_cache[arm_key] = {}
+        
+    # 我们只关心带有 PSD 前缀的自定义属性
+    target_prefixes = (PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA)
+    
+    # 遍历自定义属性
+    for key, val in empty_obj.items():
+        if key.startswith(target_prefixes):
+            _psd_results_cache[arm_key][key] = val
+
+
+
 def psd_set_result_to_registered_empty(obj_arm: bpy.types.Object, key: str, value, verbose=False) -> bool:
     """
     将 value 写入已注册到 obj_arm 的 Empty 的自定义属性中（高频写入用）。

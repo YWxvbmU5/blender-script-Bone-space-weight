@@ -41,7 +41,7 @@ def _swing_twist_decompose(q: Quaternion, twist_axis: Vector):
     return swing, twist
 
 # 从四元数中提取绕特定轴的有符号旋转角度 ================================
-def _signed_angle_from_quat(q: Quaternion, axis: Vector):
+def _signed_angle_from_quat_acos(q: Quaternion, axis: Vector):
     
     q = q.copy()
     if q.w < 0:
@@ -50,6 +50,38 @@ def _signed_angle_from_quat(q: Quaternion, axis: Vector):
     vec = Vector((q.x, q.y, q.z))
     sign = 1.0 if vec.dot(axis.normalized()) >= 0 else -1.0
     return sign * math.degrees(theta)
+
+def _signed_angle_from_quat_atan2(q: Quaternion, axis: Vector):
+    """
+    使用 atan2 从四元数中提取绕特定轴的有符号旋转角度。
+    
+    :param q: 旋转四元数
+    :param axis: 参考轴向 (Vector((1,0,0)), (0,1,0) 或 (0,0,1))
+    :return: 有符号角度（度）范围 [-180, 180]
+    """
+    # 确保四元数处于正半球，避免双倍覆盖带来的角度翻转
+    q_calc = q.copy()
+    if q_calc.w < 0:
+        q_calc.negate()
+
+    # 将四元数虚部向量投影到目标轴上，得到 sin(theta/2) 的缩放值
+    q_vec = Vector((q_calc.x, q_calc.y, q_calc.z))
+    # axis.normalized().dot(q_vec) 提取了 sin(theta/2) 在该轴上的分量
+    sin_half = q_vec.dot(axis.normalized())
+    cos_half = q_calc.w
+
+    # 使用 atan2 计算 theta/2，结果范围 [-pi, pi]
+    angle_rad = 2.0 * math.atan2(sin_half, cos_half)
+
+    # 将弧度转换为角度，并规范化到 [-180, 180] 之间
+    angle_deg = math.degrees(angle_rad)
+    
+    if angle_deg > 180.0:
+        angle_deg -= 360.0
+    elif angle_deg < -180.0:
+        angle_deg += 360.0
+        
+    return angle_deg
 
 # 计算当前值相对于目标值的三角形映射比例（暂时没用） =====================
 def _triangular_ratio(cur, target):
@@ -108,13 +140,23 @@ def compute_direct_channel_weight(
                 return max(-1.0, min(1.0, v))
 
             if ch_axis == 'X':
-                sx = _clamp1(swing_q.x)
-                w_deg = math.degrees(2.0 * math.asin(sx))
+                if mode == 'record_rot_SWING_X_TWIST':
+                    w_deg = _signed_angle_from_quat_atan2(twist_q, twist_axis)
+                else:
+                    sx = _clamp1(swing_q.x)
+                    w_deg = math.degrees(2.0 * math.asin(sx))
             elif ch_axis == 'Y':
-                w_deg = _signed_angle_from_quat(twist_q, twist_axis)
+                if mode == 'record_rot_SWING_Y_TWIST':
+                    w_deg = _signed_angle_from_quat_atan2(twist_q, twist_axis)
+                else:
+                    sy = _clamp1(swing_q.y)
+                    w_deg = math.degrees(2.0 * math.asin(sy))
             elif ch_axis == 'Z':
-                sz = _clamp1(swing_q.z)
-                w_deg = math.degrees(2.0 * math.asin(sz))
+                if mode == 'record_rot_SWING_Z_TWIST':
+                    w_deg = _signed_angle_from_quat_atan2(twist_q, twist_axis)
+                else:
+                    sz = _clamp1(swing_q.z)
+                    w_deg = math.degrees(2.0 * math.asin(sz))
 
         w = math.radians(w_deg)
         if math.isnan(w):
