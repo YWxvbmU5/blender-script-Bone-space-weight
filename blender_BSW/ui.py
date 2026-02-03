@@ -5,7 +5,7 @@ from mathutils import Vector, Matrix, Euler
 from gpu_extras.batch import batch_for_shader
 from .core import _psd_results_cache, _psd_perf_stats
 
-from .utils import _get_selected_pair_bone, _get_selected_armature_name, get_weight_cache, update_direct_channel  # 导入辅助
+from .utils import _get_selected_pair_bone, _get_selected_armature_name, psd_get_registered_empty, get_weight_cache, update_direct_channel  # 导入辅助
 from .operators import PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA
 from .core import (
     _psd_perf_stats,
@@ -207,7 +207,57 @@ class PSDPanel(bpy.types.Panel):
                 
                 sub_box.label(text=f"当前注册: {registered_name}", icon='INFO')
 
-            elif arm.psd_output_mode == 'APPLY_DRIVERS':
+            elif arm.psd_output_mode == 'DRIVERS_MODS':
+                drive_box = sub_box
+                drive_box.label(text="驱动器接管模式 (高性能)", icon='DRIVER')
+                
+                cache_empty = psd_get_registered_empty(arm)
+                
+                # 初始化状态变量
+                is_muted = False
+                has_drivers = False
+                
+                if cache_empty and cache_empty.animation_data:
+                    drivers = cache_empty.animation_data.drivers
+                    if len(drivers) > 0:
+                        has_drivers = True
+                        is_muted = drivers[0].mute # 以第一个驱动器作为状态判定参考
+
+                # --- 状态看板 ---
+                if not has_drivers:
+                    drive_box.label(text="未绑定驱动器，请点击全部绑定", icon='INFO')
+                else:
+                    status_text = "状态: 已禁用 (静音)" if is_muted else "状态: 运行中 (计算已接管)"
+                    drive_box.label(text=status_text, icon='CHECKMARK' if not is_muted else 'CANCEL')
+
+                # --- 动态功能按键区 ---
+                row = drive_box.row(align=True)
+                
+                if not is_muted and has_drivers:
+                    # 如果当前在运行，显示“禁用”按钮
+                    row.operator('psd.mute_drivers', text='禁用驱动', icon='RESTRICT_VIEW_ON')
+                else:
+                    # 如果当前已禁用，显示“启动”按钮
+                    row.operator('psd.unmute_drivers', text='启动驱动', icon='RESTRICT_VIEW_OFF')
+                
+                row.operator('psd.refresh_drivers', text='修复刷新', icon='FILE_REFRESH')
+
+                # --- 绑定与管理 ---
+                row = drive_box.row(align=True)
+                row.operator('psd.batch_bind_all', text='全部绑定', icon='ASSET_MANAGER')
+                row.operator('psd.bind_driver_to_cache', text='绑定选中', icon='ADD')
+
+                # --- 第三行：清理操作 ---
+                row = drive_box.row(align=True)
+                row.operator('psd.remove_driver_from_cache', text='删除选中', icon='REMOVE')
+                
+                # --- 第四行：危险区域 ---
+                drive_box.separator()
+                col = drive_box.column()
+                col.alert = True
+                col.operator('psd.clear_all_cache_drivers', text='清空所有驱动器', icon='TRASH')
+
+            elif arm.psd_output_mode == 'APPLY_DRIVERS_JSON':
                 sub_box.label(text="直接应用到 Shape Keys / 骨骼约束", icon='SHAPEKEY_DATA')
                 
                 # 统计信息
