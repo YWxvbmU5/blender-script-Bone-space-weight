@@ -4,13 +4,14 @@ import bpy
 import time
 import math
 from mathutils import Vector, Euler, Quaternion # 导入依赖
-from .utils import _safe_name, _sync_cache_from_empty, psd_get_registered_empty, _get_rest_matrix, _get_pose_matrix, _capture_bone_local_rotation_deg, _capture_bone_local_translation_effective, _capture_bone_local_scale, _is_animation_playing, psd_set_result_cache_only, psd_get_results_for_arm, _arm_key_for_obj, psd_flush_mem_to_registered_empty  # 导入捕获函数（如果移动到 utils）
+from .utils import _safe_name, _sync_cache_from_empty, psd_get_registered_empty, _get_rest_matrix, _capture_bone_local_rotation_deg, _capture_bone_local_translation_effective, _is_animation_playing, psd_set_result_cache_only, _arm_key_for_obj, psd_flush_mem_to_registered_empty, psd_set_result_to_registered_empty
 from .utils import PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA, _psd_results_cache, _PSD_CACHE_OBJ_PROP
 from .json_shape_driver import ShapeDriver
 from .json_pose_driver import PoseDriver
 from .math_utils import (
     compute_direct_channel_weight, compute_rotation_weight,
-    compute_location_weight, compute_scale_weight, compute_triggers
+    compute_location_weight, compute_scale_weight, compute_triggers,
+    compute_rbf_group_weights
 )
 
 # 全局变量
@@ -342,334 +343,213 @@ def _psd_samples_equal(s1, s2, eps=1e-5):
                 return False
     return True
 
+
+def _fetch_armature_states(arm, depsgraph, bone_filter):
+    """
+    获取目标骨架在当前评估图下的所有受监控骨骼的 Transform 状态。
+    
+    Returns:
+        tuple: (bone_to_cur_rot, bone_to_cur_loc, bone_to_cur_sca)
+    """
+    bone_to_cur_rot, bone_to_cur_loc, bone_to_cur_sca = {}, {}, {}
+    
+    # 获取评估后的对象
+    source_obj = arm
+    if depsgraph is not None:
+        try: 
+            source_obj = arm.evaluated_get(depsgraph)
+        except Exception as e: 
+            # 替换单纯的 pass，保留调试余地
+            pass 
+
+    for bn in bone_filter:
+        try:
+            # 捕获旋转
+            cur_deg = _capture_bone_local_rotation_deg(arm, bn, depsgraph=depsgraph)
+            if cur_deg is not None: 
+                bone_to_cur_rot[bn] = Vector(cur_deg)
+                
+            # 捕获位移和缩放
+            pb = source_obj.pose.bones.get(bn)
+            if pb:
+                cur_loc = _capture_bone_local_translation_effective(arm, bn, depsgraph=depsgraph)
+                bone_to_cur_loc[bn] = cur_loc.copy()
+                bone_to_cur_sca[bn] = pb.scale.copy()
+        except Exception as e:
+            # print(f"[BPW DEBUG] Fetch error on bone {bn}: {e}")
+            pass
+            
+    return bone_to_cur_rot, bone_to_cur_loc, bone_to_cur_sca
+
+
+def _dispatch_calculations(arm, saved_entries, bone_filter, skip_bones, state_maps, is_driver_mode, perf_enabled, arm_stats):
+    """
+    将计算任务分发给具体的数学算法，并记录性能。
+    """
+    bone_to_cur_rot, bone_to_cur_loc, bone_to_cur_sca = state_maps
+    rbf_groups = {}
+    normal_entries = []
+    
+    # 1. 任务分类
+    for entry in saved_entries:
+        bn = entry.bone_name
+        if not bn or not entry.name or bn not in bone_filter: 
+            continue
+        if getattr(entry, 'use_rbf', False):
+            rbf_groups.setdefault(bn, []).append(entry)
+        elif not is_driver_mode:
+            normal_entries.append(entry)
+
+    # 2. RBF 分组计算
+    for bn, entries in rbf_groups.items():
+        if bn in skip_bones: 
+            continue
+        cur_rot = bone_to_cur_rot.get(bn)
+        if cur_rot is not None:
+            compute_rbf_group_weights(cur_rot, entries, psd_set_result_cache_only, arm, bn, _safe_name, PREFIX_RESULT)
+
+    # 3. 常规条目计算
+    for entry in normal_entries:
+        bn, en = entry.bone_name, entry.name
+        if bn not in bone_filter: continue
+        if bn not in bone_to_cur_rot and bn not in bone_to_cur_loc: continue
+
+        # 性能记录起点
+        t_entry_start = time.perf_counter() if perf_enabled else None
+        
+        if bn not in skip_bones:
+            try:
+                if getattr(entry, 'is_direct_channel', False):
+                    compute_direct_channel_weight(entry, bone_to_cur_rot, arm, bn, psd_set_result_cache_only, PREFIX_RESULT, _safe_name)
+                if getattr(entry, 'has_rot', False):
+                    compute_rotation_weight(entry, bone_to_cur_rot, bn, arm, psd_set_result_cache_only, PREFIX_RESULT, _safe_name)
+                if getattr(entry, 'has_loc', False):
+                    compute_location_weight(entry, bone_to_cur_loc, bn, arm, psd_set_result_cache_only, PREFIX_RESULT_LOC, _safe_name)
+                if getattr(entry, 'has_sca', False):
+                    compute_scale_weight(entry, bone_to_cur_sca, bn, arm, psd_set_result_cache_only, PREFIX_RESULT_SCA, _safe_name)
+                if getattr(arm, "psd_triggers", None):
+                    compute_triggers(arm, psd_set_result_cache_only, PREFIX_RESULT_LOC, _safe_name)
+            except Exception as e_entry:
+                print(f"[BPW ERROR] Error calculating entry {en}: {e_entry}")
+
+        # 性能记录终点
+        if perf_enabled and arm_stats:
+            dt_ms = (time.perf_counter() - t_entry_start) * 1000.0 if t_entry_start else 0.0
+            rep_key = f"{PREFIX_RESULT}{_safe_name(bn)}_{_safe_name(en)}"
+            ent_stats = arm_stats["entries"].setdefault(rep_key, {"hist": [], "last_ms": 0.0, "avg_ms": 0.0})
+            ent_stats["last_ms"] = dt_ms
+            ent_stats["hist"].append(dt_ms)
+            if len(ent_stats["hist"]) > 10:  # 假设 history_len 默认 10
+                ent_stats["hist"].pop(0)
+            ent_stats["avg_ms"] = sum(ent_stats["hist"]) / len(ent_stats["hist"])
+
+
 def _psd_compute_all(arm=None, depsgraph=None, scene=None):
     """
-    计算所有 armature 的 PSD 结果（修正版，包含稳健的骨骼变换检测缓存）。
-    保持权重计算逻辑不变，改变点仅在缓存/跳过未变化骨骼和触发器访问上。
+    BPW 核心调度中心。负责节流控制、状态采集、分发计算以及数据回写。
     """
     global last_compute_time, _psd_perf_stats, _psd_bone_state_cache
     current_time = time.time()
 
-    # 计算最小间隔：播放时不节流 -> min_interval = 0.0；空闲时读取场景属性 psd_idle_hz
+    # --- 1. 节流控制 ---
     try:
         sc = bpy.context.scene if (bpy.context and getattr(bpy.context, "scene", None)) else None
         if _is_animation_playing():
             min_interval = 0.0
         else:
             hz = int(getattr(sc, "psd_idle_hz", 10) or 10)
-            if hz < 1:
-                hz = 1
-            elif hz > 240:
-                hz = 240
-            min_interval = 1.0 / float(hz)
+            min_interval = 1.0 / max(1, min(hz, 240))
     except Exception:
         min_interval = 0.05
-
-    if min_interval > 0.0:
-        if current_time - last_compute_time < min_interval:
-            return
+    if min_interval > 0.0 and (current_time - last_compute_time < min_interval):
+        return
     last_compute_time = current_time
 
-    # perf flag
-    perf_enabled = False
-    try:
-        sc = bpy.context.scene if bpy.context and bpy.context.scene else None
-        perf_enabled = bool(sc and getattr(sc, 'psd_perf_enabled', False))
-        history_len = int(getattr(sc, 'psd_perf_history_len', 10) or 10)
-    except Exception:
-        perf_enabled = False
-        history_len = 10
-
+    perf_enabled = getattr(bpy.context.scene, 'psd_perf_enabled', False) if bpy.context and bpy.context.scene else False
     t_start_total = time.perf_counter() if perf_enabled else None
 
-    # Debug：临时打开以验证缓存行为（不要长期开启）
-    DEBUG_CACHE = False
-
+    # --- 2. 遍历处理骨架 ---
     for arm in [o for o in bpy.data.objects if o.type == 'ARMATURE']:
-
         output_mode = getattr(arm, "psd_output_mode", 'STORE_TO_EMPTY')
-
-        if output_mode == 'DRIVERS_MODS':
-            arm_key = _arm_key_for_obj(arm)
-            
-            
-            if getattr(arm, "psd_triggers", None):
-                
-                compute_triggers(arm, psd_set_result_cache_only, PREFIX_RESULT_LOC, _safe_name)
-
-            # --- 后置同步与处理 ---
-            _sync_cache_from_empty(arm_key, psd_get_registered_empty(arm))
-            
-            continue 
-
+        is_driver_mode = (output_mode == 'DRIVERS_MODS')
         
-        # 每个 arm 的处理放在 try/finally 里以保证 arm perf 写回
+        saved_entries = getattr(arm, 'psd_saved_poses', None)
+        if not saved_entries: 
+            continue
+
         try:
-            # 可靠的缓存 key（优先 as_pointer()，否则 id(arm)）
-            try:
-                arm_key = arm.as_pointer()
-            except Exception:
-                arm_key = id(arm)
+            arm_key = _arm_key_for_obj(arm)
+            arm_stats = _psd_perf_stats.setdefault(arm.name, {"last_total_ms": 0.0, "last_arm_ms": 0.0, "entries": {}}) if perf_enabled else None
+            t_start_arm = time.perf_counter() if perf_enabled else None
 
-            # 如果旧实现/用户之前的缓存是用 arm.name 保存的，迁移它到 arm_key（一次性）
-            if arm_key not in _psd_bone_state_cache and getattr(arm, "name", None) in _psd_bone_state_cache:
-                try:
-                    _psd_bone_state_cache[arm_key] = _psd_bone_state_cache.pop(arm.name)
-                except Exception:
-                    _psd_bone_state_cache.setdefault(arm_key, {})
+            # A. 确定过滤名单
+            bone_filter = set(p.bone_name for p in arm.psd_bone_pairs if p.bone_name) if getattr(arm, "psd_bone_pairs", None) else set(e.bone_name for e in saved_entries if e.bone_name)
 
-            try:
-                saved = getattr(arm, 'psd_saved_poses', None)
-                if not saved:
-                    continue
-            except Exception:
-                continue
+            # B. 采集状态
+            state_maps = _fetch_armature_states(arm, depsgraph, bone_filter)
+            bone_to_cur_rot, bone_to_cur_loc, bone_to_cur_sca = state_maps
 
-            # bone_filter
-            bone_filter = None
-            try:
-                if getattr(arm, "psd_bone_pairs", None) and len(arm.psd_bone_pairs) > 0:
-                    bone_filter = set([p.bone_name for p in arm.psd_bone_pairs if p.bone_name])
-            except Exception:
-                bone_filter = None
-            if bone_filter is None:
-                bone_filter = set(e.bone_name for e in saved if e.bone_name)
-
-            # 预采样：当前旋转/位移/缩放（避免重复捕捉）
-            bone_to_cur_rot = {}
-            bone_to_cur_loc = {}
-            bone_to_cur_sca = {}
-            source_obj = arm
-            try:
-                if depsgraph is not None:
-                    eval_obj = arm.evaluated_get(depsgraph)
-                    if eval_obj:
-                        source_obj = eval_obj
-            except Exception:
-                source_obj = arm
-
-            for bn in bone_filter:
-                # 旋转
-                try:
-                    cur_deg = _capture_bone_local_rotation_deg(arm, bn, depsgraph=depsgraph)
-                    if cur_deg is not None:
-                        bone_to_cur_rot[bn] = Vector(cur_deg)
-                except Exception:
-                    pass
-                # 位移 / 缩放（从评估对象的 pose.bones 取，或原始 arm 的 pose.bones）
-                try:
-                    pb = source_obj.pose.bones.get(bn)
-                    if pb:
-                        # copy() 保证接下来的比较不会被外部修改影响
-                        try:
-                            cur_loc = _capture_bone_local_translation_effective(arm, bn, depsgraph=depsgraph)
-                            bone_to_cur_loc[bn] = cur_loc.copy()
-                        except Exception:
-                            bone_to_cur_loc[bn] = Vector((0.0, 0.0, 0.0))
-                        bone_to_cur_sca[bn] = pb.scale.copy()
-                except Exception:
-                    pass
-
-            # ----------------- 增加：检测哪些骨骼在本帧没有变化，后面跳过这些骨骼 -----------------
+            # C. 变化检测 (Skip Logic)
             arm_cache = _psd_bone_state_cache.setdefault(arm_key, {})
             skip_bones = set()
-            _PSD_EPS = 1e-5
             for bn_check in bone_filter:
                 sample = _psd_make_sample_from_maps(bone_to_cur_rot, bone_to_cur_loc, bone_to_cur_sca, bn_check)
                 last_sample = arm_cache.get(bn_check)
-                if sample is not None and last_sample is not None and _psd_samples_equal(sample, last_sample, eps=_PSD_EPS):
+                if sample is not None and last_sample is not None and _psd_samples_equal(sample, last_sample, eps=1e-5):
                     skip_bones.add(bn_check)
-                else:
-                    # 仅在可采样时写入缓存，避免写入 None
-                    if sample is not None:
-                        arm_cache[bn_check] = sample
+                elif sample is not None:
+                    arm_cache[bn_check] = sample
+                    
+            # 排除触发器骨骼不跳过
+            trigger_bones = {getattr(t, "bone_name", "") for t in getattr(arm, "psd_triggers", ())} | {getattr(t, "target_bone", "") for t in getattr(arm, "psd_triggers", ())}
+            skip_bones.difference_update(trigger_bones)
 
-            if DEBUG_CACHE:
-                print(f"[PSD CACHE] arm.name={arm.name} arm_key={arm_key} skip {len(skip_bones)} bones; cached={len(arm_cache)}")
+            # D. 分发计算
+            _dispatch_calculations(arm, saved_entries, bone_filter, skip_bones, state_maps, is_driver_mode, perf_enabled, arm_stats)
 
-            # ------------------------------------------------------------------------------------
+            # E. 数据写回
+            if not is_driver_mode:
+                mem_cache = _psd_results_cache.get(arm_key, {})
+                if mem_cache:
+                    if output_mode == 'STORE_TO_EMPTY':
+                        psd_flush_mem_to_registered_empty(arm)
+                    elif output_mode == 'APPLY_DRIVERS_JSON':
+                        # JSON 写入逻辑
+                        exp = _shape_expressions_cache.get(arm_key) or load_shape_drivers(arm)
+                        if exp: ShapeDriver(exp).process(arm_key, mem_cache)
+                        drv = _pose_drivers_cache.get(arm_key) or load_pose_drivers(arm)
+                        if drv: PoseDriver(drv).process(arm, arm_key, mem_cache)
 
-            # ----------------- 修复：排除触发器引用的骨骼，不对它们做跳过优化 -----------------
-            try:
-                trigger_bones = set()
-                # 一定要用原始 arm（不要用 eval_obj）去访问自定义 collection
-                for trig in getattr(arm, "psd_triggers", ()):
-                    # trig.bone_name 是触发器位置来源，trig.target_bone 是被写回结果的目标骨骼
-                    if getattr(trig, "bone_name", None):
-                        trigger_bones.add(trig.bone_name)
-                    if getattr(trig, "target_bone", None):
-                        trigger_bones.add(trig.target_bone)
-                # 从 skip_bones 中去掉触发器相关骨骼（如果它们存在）
-                if trigger_bones:
-                    skip_bones.difference_update(trigger_bones)
-            except Exception:
-                # 忽略任何访问异常，保证稳健性
-                pass
-            # -----------------------------------------------------------------------------
-
-
-            # perf container（只有在处理 entries 前才创建）
-            arm_stats = None
-            if perf_enabled:
-                arm_stats = _psd_perf_stats.setdefault(arm.name, {"last_total_ms": 0.0, "last_arm_ms": 0.0, "entries": {}})
-
-            # 记下 arm 层起点（在准备处理 entries 之前）
-            t_start_arm = time.perf_counter() if perf_enabled else None
-
-            # ---------- 触发器计算（总是用原始 arm） ----------
-            orig_arm = arm
-            if getattr(orig_arm, "psd_triggers", None):
-                compute_triggers(
-                    orig_arm,
-                    psd_set_result_cache_only, PREFIX_RESULT_LOC, _safe_name
-                )
-            #--------------------------------------------------------
-
-
-            # 遍历 saved entries（按条目计算），但跳过 skip_bones
-            for entry in saved:
-                bn = entry.bone_name
-                en = entry.name
-                # 过滤掉没有骨骼名/条目名的条目（这些不是有效样本，不记录 perf）
-                if not bn or not en:
-                    continue
-                if bn not in bone_filter:
-                    continue
-                # 如果未采样到该骨骼的任何通道则跳过（但仍做 perf 记录）
-                if bn not in bone_to_cur_rot and bn not in bone_to_cur_loc:
-                    continue
-
-                # 在通过基本有效性检查后开始计时（保证我们不会为无效条目统计）
-                t_entry_start = time.perf_counter() if perf_enabled else None
-
-                # 标记是否跳过计算（skip 优化）——但不要直接 continue，使用 flag
-                entry_was_skipped = False
-                if bn in skip_bones:
-                    entry_was_skipped = True
-
-                rep_key = None
-                # 用于兜底的 rep_key（即使跳过，也有 key 用于记录）
-                try:
-                    if getattr(entry, 'has_rot', False):
-                        rep_key = f"{PREFIX_RESULT}{_safe_name(bn)}_{_safe_name(en)}"
-                    elif getattr(entry, 'has_loc', False):
-                        rep_key = f"{PREFIX_RESULT_LOC}{_safe_name(bn)}_{_safe_name(en)}"
-                    elif getattr(entry, 'has_sca', False):
-                        rep_key = f"{PREFIX_RESULT_SCA}{_safe_name(bn)}_{_safe_name(en)}"
-                    else:
-                        rep_key = f"{PREFIX_RESULT}{_safe_name(bn)}_{_safe_name(en)}"
-                except Exception:
-                    rep_key = f"{PREFIX_RESULT}unknown_{_safe_name(str(en) or 'entry')}"
-
-                try:
-                    # 如果跳过，则不做后续重运算；否则按原有逻辑处理 channels
-                    if not entry_was_skipped:
-
-                        # ---------------- Direct channel ----------------
-                        if getattr(entry, 'is_direct_channel', False):
-                            compute_direct_channel_weight(
-                                entry, bone_to_cur_rot, arm, bn,
-                                psd_set_result_cache_only, PREFIX_RESULT, _safe_name
-                            )
-                        # ---------------- Rotation channel ----------------
-                        if getattr(entry, 'has_rot', False):
-                            compute_rotation_weight(
-                                entry, bone_to_cur_rot, bn, arm,
-                                psd_set_result_cache_only, PREFIX_RESULT, _safe_name
-                            )
-                        # ---------------- Location channel ----------------
-                        if getattr(entry, 'has_loc', False):
-                            compute_location_weight(
-                                entry, bone_to_cur_loc, bn, arm,
-                                psd_set_result_cache_only, PREFIX_RESULT_LOC, _safe_name
-                            )
-                        # ---------------- Scale channel ----------------
-                        if getattr(entry, 'has_sca', False):
-                            compute_scale_weight(
-                                entry, bone_to_cur_sca, bn, arm,
-                                psd_set_result_cache_only, PREFIX_RESULT_SCA, _safe_name
-                            )
-                        # ---------------- end ----------------
-                    else:
-                        # 如果 entry_was_skipped：什么也不做（只是跳过 heavy 计算）
-                        pass
-
-                except Exception as e_entry:
-                    # 记录 entry 层异常（但不阻止 perf 写回）
-                    print("PSD entry 计算出错", getattr(entry, "name", "<unknown>"), e_entry)
-
-                finally:
-                    # 无论成功/跳过/异常，都尝试记录 entry 时间（如果启用 perf）
-                    if perf_enabled and arm_stats is not None:
-                        t_entry_end = time.perf_counter()
-                        dt_ms = max(0.0, (t_entry_end - t_entry_start) * 1000.0) if t_entry_start else 0.0
-
-                        ent_stats = arm_stats["entries"].setdefault(rep_key, {"hist": [], "last_ms": 0.0, "avg_ms": 0.0})
-                        ent_stats["last_ms"] = dt_ms
-                        hist = ent_stats["hist"]
-                        hist.append(dt_ms)
-                        if len(hist) > history_len:
-                            hist.pop(0)
-                        ent_stats["avg_ms"] = (sum(hist) / len(hist)) if hist else 0.0
-
-            # end for entries
+            if perf_enabled and arm_stats:
+                arm_stats["last_arm_ms"] = (time.perf_counter() - t_start_arm) * 1000.0 if t_start_arm else 0.0
 
         except Exception as e:
-            # 捕获 arm 级别异常（处理过程中可能发生）
-            print('PSD计算骨架时出错', getattr(arm, "name", "<unknown>"), e)
+            print(f'[BPW ERROR] Failed on armature {getattr(arm, "name", "unknown")}: {e}')
+
+    # --- 3. 总体性能收尾 ---
+    # (保留原有的全局性能打印逻辑)
+        
         finally:
-            # === 批量 flush 内存缓存到持久存储 ===
-            arm_key = _arm_key_for_obj(arm)  # utils 中已定义
-            mem_cache = _psd_results_cache.get(arm_key, {})
+            # --- [E] 数据写回 (Flush) ---
+            # 驱动模式通常不进入这里的存储逻辑，因为计算结果已直接由驱动器或 cache_only 写入
+            if is_driver_mode:
+                if perf_enabled:
+                    arm_stats["last_arm_ms"] = (time.perf_counter() - t_start_arm) * 1000.0 if t_start_arm else 0.0
+                continue 
 
+            mem_cache = _psd_results_cache.get(_arm_key_for_obj(arm), {})
             if mem_cache:
-                
-                mode = getattr(arm, "psd_output_mode", "STORE_TO_EMPTY")
+                if output_mode == 'STORE_TO_EMPTY':
+                    psd_flush_mem_to_registered_empty(arm)
+                elif output_mode == 'APPLY_DRIVERS_JSON':
+                    arm_key_tmp = _arm_key_for_obj(arm)
+                    exp = _shape_expressions_cache.get(arm_key_tmp) or load_shape_drivers(arm)
+                    if exp: ShapeDriver(exp).process(arm_key_tmp, mem_cache)
+                    drv = _pose_drivers_cache.get(arm_key_tmp) or load_pose_drivers(arm)
+                    if drv: PoseDriver(drv).process(arm, arm_key_tmp, mem_cache)
 
-                flushed = False
-
-                if mode == 'STORE_TO_EMPTY':
-                    try:
-                        result = psd_flush_mem_to_registered_empty(arm)
-                        flushed = bool(result) if result is not None else True
-                        if flushed:
-                            # print(f"[PSD] 已将原始结果存储到注册的 Empty（骨架: {arm.name}）")
-                            continue
-                    except Exception as e:
-                        print(f"[PSD] Empty 存储失败: {e}")
-                        flushed = False
-
-                    # ================
-
-                elif mode == 'APPLY_DRIVERS_JSON':
-                    flushed = True
-                    # ==================== Shape Driver ====================
-                    expressions = _shape_expressions_cache.get(arm_key)
-                    if expressions is None:
-                        expressions = load_shape_drivers(arm)
-                        _shape_expressions_cache[arm_key] = expressions
-                    if expressions:
-                        ShapeDriver(expressions).process(arm_key, mem_cache)
-
-                    # ==================== Pose Driver ====================
-                    drivers = _pose_drivers_cache.get(arm_key)
-                    if drivers is None:
-                        drivers = load_pose_drivers(arm)
-                        _pose_drivers_cache[arm_key] = drivers
-                    if drivers:
-                        PoseDriver(drivers).process(arm, arm_key, mem_cache)
-
-            # ================================================
-            if perf_enabled:
-                try:
-                    t_end_arm = time.perf_counter()
-                    arm_ms = max(0.0, (t_end_arm - t_start_arm) * 1000.0) if t_start_arm else 0.0
-                    if arm_stats is None:
-                        arm_stats = _psd_perf_stats.setdefault(arm.name, {"last_total_ms": 0.0, "last_arm_ms": 0.0, "entries": {}})
-                    arm_stats["last_arm_ms"] = arm_ms
-                except Exception:
-                    # 写 perf 不能让主流程崩溃
-                    pass
+            if perf_enabled and arm_stats:
+                arm_stats["last_arm_ms"] = (time.perf_counter() - t_start_arm) * 1000.0 if t_start_arm else 0.0
 
     # total perf
     if perf_enabled:

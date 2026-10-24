@@ -4,7 +4,7 @@ from .utils import _safe_name,psd_get_registered_empty
 
 
 def setup_rotation_driver(driver, arm, entry):
-    """配置旋转驱动器：支持标准 PSD 锥体和 Direct Channel (Swing/Twist)"""
+    """配置旋转驱动器：支持标准 PSD 圆锥、椭圆锥、Swing/Twist 投影和直接通道模式"""
     bone_name = entry.bone_name
     
     # --- 情况 A: Direct Channel (直接通道模式) ---
@@ -18,27 +18,22 @@ def setup_rotation_driver(driver, arm, entry):
         target.bone_target = bone_name
         target.transform_space = 'LOCAL_SPACE'
         
-        
         mode = getattr(entry, 'record_rot_channel_mode', 'NONE')
         ch_axis = getattr(entry, 'channel_axis', 'X')
         
-        # 根据是否是 Swing/Twist 分解选择旋转模式
         if "SWING" in mode:
-            
             target.rotation_mode = 'SWING_TWIST_X' if '_X_' in mode else \
-                                 ('SWING_TWIST_Y' if '_Y_' in mode else 'SWING_TWIST_Z')
-            # 根据通道选择具体分量
+                                   ('SWING_TWIST_Y' if '_Y_' in mode else 'SWING_TWIST_Z')
             target.transform_type = f'ROT_{ch_axis}'
         else:
-            # 普通欧拉旋转
             target.rotation_mode = 'XYZ'
             target.transform_type = f'ROT_{ch_axis}'
             
-        # 表达式非常简单，直接输出变量值 (弧度)
         driver.expression = "rot_val"
 
-    # --- 情况 B: 标准 PSD 旋转  ---
+    # --- 情况 B: 标准 PSD 旋转（含投影映射、Swing/Twist 分解与椭圆锥） ---
     else:
+        # 1. 绑定当前旋转变量 crx, cry, crz
         for ax in ['X', 'Y', 'Z']:
             var = driver.variables.new()
             var.name = f"cr{ax.lower()}"
@@ -50,20 +45,51 @@ def setup_rotation_driver(driver, arm, entry):
             target.transform_type = f'ROT_{ax}'
             target.transform_space = 'LOCAL_SPACE'
 
+        # 2. 获取配置参数
         p, r = entry.pose_rot, entry.rest_rot
         angle = getattr(entry, 'cone_angle', 90.0)
-        axis_idx = getattr(entry, 'axis_idx', 1)
-        mode_val = 0 if getattr(entry, 'cone_enabled', False) else 1
+        axis_map = {'X': 0, 'Y': 1, 'Z': 2}
+        axis_idx = axis_map.get(getattr(entry, 'cone_axis', 'Y'), 1)
+        # use_triangle_weights = getattr(entry, 'use_triangle_weights', 0)
+        
+        # --- 核心修改：计算 mode_val ---
+        # 优先级：圆锥模式 > Swing/Twist 模式 > 基础投影模式
+        if getattr(entry, 'use_triangle_weights', 0):
+            use_triangle_weights = 1
+        else:
+            use_triangle_weights = 0
 
+        if getattr(entry, 'cone_enabled', False):
+            mode_val = 0  # 椭圆锥模式
+            use_triangle_weights = 0  # 强制关闭三角形权重
+        else:
+            algo = getattr(entry, 'record_rot_channel_mode', 'NONE')
+            if algo == 'record_rot_SWING_X_TWIST':
+                mode_val = 2
+            elif algo == 'record_rot_SWING_Y_TWIST':
+                mode_val = 3
+            elif algo == 'record_rot_SWING_Z_TWIST':
+                mode_val = 4
+            else:
+                mode_val = 1  # NONE 对应基础投影模式
+
+        # 获取缩放值
+        sx = getattr(entry, 'cone_scale_x', 1.0)
+        sy = getattr(entry, 'cone_scale_y', 1.0)
+        sz = getattr(entry, 'cone_scale_z', 1.0)
+
+        # 3. 构造表达式 (调用 psd_rot)
         driver.expression = (
             f"psd_rot(crx, cry, crz, "
             f"{p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f}, "
             f"{r[0]:.3f}, {r[1]:.3f}, {r[2]:.3f}, "
-            f"{angle:.1f}, {axis_idx}, {mode_val})"
+            f"{angle:.1f}, {axis_idx}, {mode_val}, "
+            f"{sx:.2f}, {sy:.2f}, {sz:.2f}, "
+            f"{use_triangle_weights})"
         )
 
 def setup_location_driver(driver, arm, entry):
-    """配置位置驱动器 (psd_loc)"""
+    """Configure Position Drive (psd_loc)"""
     # 添加变量 clx, cly, clz
     for ax in ['X', 'Y', 'Z']:
         var = driver.variables.new()
@@ -95,7 +121,7 @@ def setup_location_driver(driver, arm, entry):
     )
 
 def setup_scale_driver(driver, arm, entry):
-    """配置缩放驱动器 (psd_sca)"""
+    """Configure Scale Drive (psd_sca)"""
     for ax in ['X', 'Y', 'Z']:
         var = driver.variables.new()
         var.name = f"cs{ax.lower()}"
@@ -114,13 +140,47 @@ def setup_scale_driver(driver, arm, entry):
         f"{0})"
     )
 
+def setup_trigger_driver(driver, arm, trig):
+    """Configure Trigger Drive (psd_trig)"""
+    # 1. 变量：触发骨骼的世界坐标 (t_w...)
+    for ax in ['X', 'Y', 'Z']:
+        var = driver.variables.new()
+        var.name = f"t_w{ax.lower()}"
+        var.type = 'TRANSFORMS'
+        target = var.targets[0]
+        target.id = arm
+        target.bone_target = trig.bone_name
+        target.transform_type = f'LOC_{ax}'
+        target.transform_space = 'WORLD_SPACE' # 必须是世界空间
+
+    # 2. 变量：目标骨骼的世界坐标 (g_w...)
+    for ax in ['X', 'Y', 'Z']:
+        var = driver.variables.new()
+        var.name = f"g_w{ax.lower()}"
+        var.type = 'TRANSFORMS'
+        target = var.targets[0]
+        target.id = arm
+        target.bone_target = trig.target_bone
+        target.transform_type = f'LOC_{ax}'
+        target.transform_space = 'WORLD_SPACE' # 必须是世界空间
+
+    # 获取参数
+    radius = getattr(trig, 'radius', 0.1)
+    # 假设映射：'LINEAR' -> 0, 'SMOOTH' -> 1
+    mode_val = 1 if getattr(trig, 'falloff', 'LINEAR') == 'SMOOTH' else 0
+
+    # 拼接表达式：psd_trig(t_wx, t_wy, t_wz, g_wx, g_wy, g_wz, radius, mode)
+    driver.expression = (
+        f"psd_trig(t_wx, t_wy, t_wz, g_wx, g_wy, g_wz, "
+        f"{radius:.4f}, {mode_val})"
+    )
 
 
 
 class PSD_OT_BindDriverToCache(bpy.types.Operator):
-    """将 PSD 算法赋予到注册的 Empty 缓存对象的自定义属性上"""
+    """Configure PSD Algorithm to be applied to the custom properties of the registered Empty cache object"""
     bl_idname = "psd.bind_driver_to_cache"
-    bl_label = "绑定驱动器到缓存 Empty"
+    bl_label = "Bind Driver to Cache Empty"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -128,7 +188,7 @@ class PSD_OT_BindDriverToCache(bpy.types.Operator):
         cache_empty = psd_get_registered_empty(arm)
         
         if not cache_empty:
-            self.report({'ERROR'}, "未找到注册的 Empty 缓存！")
+            self.report({'ERROR'}, "No registered 'Empty' cache found!")
             return {'CANCELLED'}
 
         idx = arm.psd_saved_pose_index
@@ -181,9 +241,9 @@ class PSD_OT_BindDriverToCache(bpy.types.Operator):
 
         # 最后统一报告结果
         if results:
-            self.report({'INFO'}, f"✅ 已激活通道: {', '.join(results)}")
+            self.report({'INFO'}, f"✅ Channel Activated: {', '.join(results)}")
         else:
-            self.report({'WARNING'}, "该条目未启用任何通道 (ROT/LOC/SCA)")
+            self.report({'WARNING'}, "No active channels found (ROT/LOC/SCA)")
 
         return {'FINISHED'}
 
@@ -197,9 +257,9 @@ class PSD_OT_BindDriverToCache(bpy.types.Operator):
                     
 
 class PSD_OT_BatchBindAll(bpy.types.Operator):
-    """一键为当前骨架的所有条目生成/更新 PSD 驱动器"""
+    """Generate/Update PSD Drivers for All Entries"""
     bl_idname = "psd.batch_bind_all"
-    bl_label = "一键绑定所有条目"
+    bl_label = "Generate/Update PSD Drivers for All Entries"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -207,11 +267,11 @@ class PSD_OT_BatchBindAll(bpy.types.Operator):
         cache_empty = psd_get_registered_empty(arm)
         
         if not cache_empty:
-            self.report({'ERROR'}, "未找到注册的 Empty 缓存！")
+            self.report({'ERROR'}, "No registered 'Empty' cache found!")
             return {'CANCELLED'}
 
         if len(arm.psd_saved_poses) == 0:
-            self.report({'WARNING'}, "没有保存的条目可供绑定")
+            self.report({'WARNING'}, "No saved entries available for binding")
             return {'FINISHED'}
 
         success_entries = 0
@@ -258,15 +318,37 @@ class PSD_OT_BatchBindAll(bpy.types.Operator):
             
             if entry_had_action:
                 success_entries += 1
+        # 驱动器
+        if hasattr(arm, "psd_triggers"):
+            for trig in arm.psd_triggers:
+                if not trig.enabled: continue
+                
 
-        self.report({'INFO'}, f"😏 批量绑定完成！共处理 {success_entries} 个条目，激活 {total_channels} 个通道")
+                # 保持 Key 统一
+                entry_key = f"{PREFIX_RESULT_LOC}{_safe_name(trig.target_bone)}_to_{_safe_name(trig.bone_name)}_{_safe_name(trig.name)}_w"
+
+                
+                if entry_key not in cache_empty:
+                    cache_empty[entry_key] = 0.0
+                
+                fcurve = cache_empty.driver_add(f'["{entry_key}"]')
+                driver = fcurve.driver
+                driver.type = 'SCRIPTED'
+                while driver.variables:
+                    driver.variables.remove(driver.variables[0])
+                
+                setup_trigger_driver(driver, arm, trig)
+                total_channels += 1
+                success_entries += 1
+
+        self.report({'INFO'}, f"😏 Batch binding complete! Processed {success_entries} entries and activated {total_channels} channels.")
         return {'FINISHED'}
 
 
 class PSD_OT_RemoveDriverFromCache(bpy.types.Operator):
-    """移除当前条目在 Empty 缓存上对应的所有驱动器"""
+    """Remove Driver from Cache"""
     bl_idname = "psd.remove_driver_from_cache"
-    bl_label = "移除条目驱动器"
+    bl_label = "Remove Driver from Cache"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -274,7 +356,7 @@ class PSD_OT_RemoveDriverFromCache(bpy.types.Operator):
         cache_empty = psd_get_registered_empty(arm)
         
         if not cache_empty:
-            self.report({'ERROR'}, "未找到缓存 Empty，无需清理。")
+            self.report({'ERROR'}, "Cache not found (Empty); no cleanup required.")
             return {'CANCELLED'}
 
         idx = arm.psd_saved_pose_index
@@ -302,17 +384,17 @@ class PSD_OT_RemoveDriverFromCache(bpy.types.Operator):
             
 
         if removed_count > 0:
-            self.report({'INFO'}, f"✅ 已成功从缓存中移除 {removed_count} 个驱动器")
+            self.report({'INFO'}, f"✅ Successfully removed {removed_count} drivers from the cache")
         else:
-            self.report({'WARNING'}, "未找到可移除的驱动器")
+            self.report({'WARNING'}, "No removable drivers found")
 
         return {'FINISHED'}
     
 
 class PSD_OT_ClearAllCacheDrivers(bpy.types.Operator):
-    """清空缓存 Empty 上所有的 PSD 相关驱动器 (慎用!)"""
+    """Clear All Cache Drivers"""
     bl_idname = "psd.clear_all_cache_drivers"
-    bl_label = "清空所有缓存驱动"
+    bl_label = "Clear All Cache Drivers"
 
     def execute(self, context):
         arm = context.object
@@ -329,15 +411,15 @@ class PSD_OT_ClearAllCacheDrivers(bpy.types.Operator):
             if any(p in dp for p in [PREFIX_RESULT, PREFIX_RESULT_LOC, PREFIX_RESULT_SCA]):
                 cache_empty.driver_remove(dp)
         
-        self.report({'INFO'}, "☠️ 所有缓存驱动器已被核平!")
+        self.report({'INFO'}, "🗑️ All cache drivers have been cleared!")
         return {'FINISHED'}
     
 
 #刷新
 class PSD_OT_RefreshDrivers(bpy.types.Operator):
-    """底层强制刷新：通过重新赋值驱动器表达式来修复红字无效问题"""
+    """Force Refresh Bottom Level"""
     bl_idname = "psd.refresh_drivers"
-    bl_label = "底层强制刷新"
+    bl_label = "Force Refresh Bottom Level"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -345,7 +427,7 @@ class PSD_OT_RefreshDrivers(bpy.types.Operator):
         cache_empty = psd_get_registered_empty(arm)
         
         if not cache_empty or not cache_empty.animation_data:
-            self.report({'WARNING'}, "没有找到需要刷新的驱动器。")
+            self.report({'WARNING'}, "No drivers found for refresh.")
             return {'CANCELLED'}
 
         # 核心逻辑：循环“抖动”表达式
@@ -367,13 +449,13 @@ class PSD_OT_RefreshDrivers(bpy.types.Operator):
         #最终大招：通知场景依赖图刷新
         context.view_layer.depsgraph.update()
         
-        self.report({'INFO'}, "🌚 驱动器已强制叫醒！")
+        self.report({'INFO'}, "🌚 Drivers have been forcefully woken up!")
         return {'FINISHED'}
     
 class PSD_OT_MuteDrivers(bpy.types.Operator):
-    """禁用所有 PSD 驱动器"""
+    """Disable All Driver"""
     bl_idname = "psd.mute_drivers"
-    bl_label = "禁用驱动器"
+    bl_label = "Disable Driver"
 
     def execute(self, context):
         arm = context.object
@@ -381,7 +463,7 @@ class PSD_OT_MuteDrivers(bpy.types.Operator):
         
         # --- 在这里添加你的判定 ---
         if not cache_empty:
-            self.report({'ERROR'}, "判定失败：未找到缓存 Empty")
+            self.report({'ERROR'}, "Check Failed: Cache Not Found (Empty)")
             return {'CANCELLED'}
             
         if not cache_empty.animation_data:
@@ -391,13 +473,13 @@ class PSD_OT_MuteDrivers(bpy.types.Operator):
             # 也可以在这里加判定，比如只禁用特定前缀的驱动器
             fcurve.mute = True
             
-        self.report({'INFO'}, "🚫 PSD 驱动器已禁用")
+        self.report({'INFO'}, "🚫 PSD Drivers have been disabled")
         return {'FINISHED'}
 
 class PSD_OT_UnmuteDrivers(bpy.types.Operator):
-    """启动所有 PSD 驱动器"""
+    """Enable All Driver"""
     bl_idname = "psd.unmute_drivers"
-    bl_label = "启动驱动器"
+    bl_label = "Enable Driver"
 
     def execute(self, context):
         arm = context.object
@@ -406,7 +488,7 @@ class PSD_OT_UnmuteDrivers(bpy.types.Operator):
         # --- 在这里添加你的判定 ---
         # 比如：判定当前是否处于 DRIVERS_MODS 模式，否则不让启动
         if getattr(arm, "psd_output_mode", "") != 'DRIVERS_MODS':
-            self.report({'WARNING'}, "判定失败：非驱动器接管模式下无法启动")
+            self.report({'WARNING'}, "Check Failed: Not in Driver Takeover Mode")
             # return {'CANCELLED'} 
 
         if not cache_empty or not cache_empty.animation_data:
@@ -418,5 +500,76 @@ class PSD_OT_UnmuteDrivers(bpy.types.Operator):
         # 启动后强制刷新一次，防止红字
         bpy.ops.psd.refresh_drivers()
         
-        self.report({'INFO'}, "✅ PSD 驱动器已启动并刷新")
+        self.report({'INFO'}, "✅ PSD Drivers have been enabled and refreshed")
+        return {'FINISHED'}
+    
+# --- 绑定单个触发器驱动器 ---
+class PSD_OT_BindTriggerDriver(bpy.types.Operator):
+    """Add Trigger Driver"""
+    bl_idname = "psd.bind_trigger_driver"
+    bl_label = "Add Trigger Driver"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm = context.object
+        cache_empty = psd_get_registered_empty(arm)
+        
+        if not cache_empty:
+            self.report({'ERROR'}, "Cache not found (Empty); no cleanup required.")
+            return {'CANCELLED'}
+
+        idx = arm.psd_trigger_index
+        if idx < 0 or idx >= len(arm.psd_triggers):
+            return {'CANCELLED'}
+        
+        trig = arm.psd_triggers[idx]
+        
+        # 构建与 Python 计算模式一致的 Key
+
+        entry_key = f"{PREFIX_RESULT_LOC}{_safe_name(trig.target_bone)}_to_{_safe_name(trig.bone_name)}_{_safe_name(trig.name)}_w"
+        
+        # 确保属性存在
+        if entry_key not in cache_empty:
+            cache_empty[entry_key] = 0.0
+            
+        # 添加/配置驱动器
+        fcurve = cache_empty.driver_add(f'["{entry_key}"]')
+        driver = fcurve.driver
+        driver.type = 'SCRIPTED'
+        
+        while driver.variables:
+            driver.variables.remove(driver.variables[0])
+            
+        setup_trigger_driver(driver, arm, trig)
+        
+        self.report({'INFO'}, f"✅ Trigger driver bound: {entry_key}")
+        return {'FINISHED'}
+
+# --- 移除单个触发器驱动器 ---
+class PSD_OT_RemoveTriggerDriver(bpy.types.Operator):
+    """Remove Trigger Driver"""
+    bl_idname = "psd.remove_trigger_driver"
+    bl_label = "Remove Trigger Driver"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm = context.object
+        cache_empty = psd_get_registered_empty(arm)
+        
+        if not cache_empty: return {'CANCELLED'}
+
+        idx = arm.psd_trigger_index
+        if idx < 0 or idx >= len(arm.psd_triggers):
+            return {'CANCELLED'}
+        
+        trig = arm.psd_triggers[idx]
+        entry_key = f"{PREFIX_RESULT_LOC}{_safe_name(trig.target_bone)}_to_{_safe_name(trig.bone_name)}_{_safe_name(trig.name)}_w"
+        
+        # 移除驱动器
+        data_path = f'["{entry_key}"]'
+        if cache_empty.driver_remove(data_path):
+            self.report({'INFO'}, f"🗑️ Trigger driver removed: {entry_key}")
+        else:
+            self.report({'WARNING'}, "No corresponding driver found")
+
         return {'FINISHED'}

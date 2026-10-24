@@ -4,22 +4,12 @@ from .core import _psd_compute_all, last_compute_time  # 导入核心
 from .utils import _is_animation_playing
 from .GUI_draw import draw_psd_visualizers
 from .GUI_draw import register_draw_handler, unregister_draw_handler
+from .utils import psd_get_registered_empty
 # 全局处理器标志
 _psd_timer_registered = False
 _msgbus_subscribed = False
 _msgbus_owner = object()
 
-
-
-@handlers.persistent
-def load_post_handler(dummy):
-    """每次打开文件后，强制重新注册驱动器函数"""
-    try:
-        from .driver_math import register_drivers
-        register_drivers()
-        print("✅ PSD 驱动器已在文件加载后自动修复注册")
-    except Exception as e:
-        print(f"❌ 自动修复注册失败: {e}")
 
 
 @handlers.persistent
@@ -89,14 +79,14 @@ def _psd_timer_func():
         try:
             _psd_compute_all(depsgraph=None)
         except Exception as e:
-            print("BSW计时器计算错误:", e)
+            print("BPW timer calculation error:", e)
         hz = int(getattr(sc, 'psd_idle_hz', 10) or 10)
         if hz < 1:
             hz = 1
         return 1.0 / float(hz)
     except Exception as e:
         _psd_timer_registered = False
-        print("BSW计时器异常:", e)
+        print("BPW timer exception:", e)
         return None
 
 def _on_play_changed():
@@ -127,7 +117,7 @@ def _on_play_changed():
                 except Exception:
                     pass
     except Exception as e:
-        print("BSW消息总线播放状态变化处理器异常:", e)
+        print("BPW Message Bus Playback State Change Handler Exception:", e)
 
 def _subscribe_msgbus_for_play_change():
     global _msgbus_subscribed
@@ -141,7 +131,7 @@ def _subscribe_msgbus_for_play_change():
         )
         _msgbus_subscribed = True
     except Exception as e:
-        print("BSW消息总线订阅失败:", e)
+        print("BPW Message Bus Subscription Failed:", e)
         _msgbus_subscribed = False
 
 def _unsubscribe_msgbus():
@@ -185,7 +175,7 @@ def psd_frame_handler(scene):
         else:
             _psd_compute_all(depsgraph=None)
     except Exception as e:
-        print("BSW帧变化处理器错误:", e)
+        print("BPW frame change handler error:", e)
 
 
 @handlers.persistent
@@ -198,12 +188,12 @@ def psd_depsgraph_handler(scene,depsgraph):
             return
         _psd_compute_all(depsgraph=depsgraph)
     except Exception as e:
-        print("BSW depsgraph处理器错误:", e)
+        print("BPW depsgraph handler error:", e)
 
 
 class PSDStartOperator(bpy.types.Operator):
     bl_idname = "object.psd_start"
-    bl_label = "启动BSW"
+    bl_label = "Start BPW"
 
     def execute(self, context):
         global _msgbus_subscribed, _psd_timer_registered
@@ -249,15 +239,15 @@ class PSDStartOperator(bpy.types.Operator):
             elif mode == 'FORCE_PLAY':
                 _psd_timer_registered = False
 
-            self.report({'INFO'}, "BSW已启动 (处理器已激活)")
+            self.report({'INFO'}, "BPW started (handlers activated)")
         else:
-            self.report({'INFO'}, "BSW已在运行")
+            self.report({'INFO'}, "BPW is already running")
         return {'FINISHED'}
 
 
 class PSDStopOperator(bpy.types.Operator):
     bl_idname = "object.psd_stop"
-    bl_label = "停止BSW"
+    bl_label = "Stop BPW"
 
     def execute(self, context):
         global _psd_timer_registered, _msgbus_subscribed
@@ -288,15 +278,16 @@ class PSDStopOperator(bpy.types.Operator):
         _psd_timer_registered = False
         _unsubscribe_msgbus()
 
-        self.report({'INFO'}, "BSW已停止 (处理器已移除)")
+        self.report({'INFO'}, "BPW stopped (handlers removed)")
         return {'FINISHED'}
 
 
 def register_handlers():
 
 
-    if load_post_handler not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(load_post_handler)
+
+    # if load_post_handler not in bpy.app.handlers.load_post:
+    #     bpy.app.handlers.load_post.append(load_post_handler)
 
 
     if not any(_handler_name_matches(h, psd_selection_handler.__name__) for h in handlers.depsgraph_update_post):
@@ -323,8 +314,8 @@ def unregister_handlers():
         bpy.types.SpaceView3D.draw_handler_remove(handler, 'WINDOW')
         del bpy.types.SpaceView3D._psd_draw_handler
 
-    if load_post_handler in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(load_post_handler)
+    # if load_post_handler in bpy.app.handlers.load_post:
+    #     bpy.app.handlers.load_post.remove(load_post_handler)
 
 
     try:

@@ -1,11 +1,11 @@
 bl_info = {
-    "name": "骨骼空间姿态权重(BSW)",
+    "name": "Bone Pose Weight",
     "author": "s0lus",
     "version": (2, 8),
     "blender": (4, 3, 2),
-    "location": "3D视图 > 侧边栏 > BSW",
-    "description": "骨骼空间姿态权重(Bone Space Weight)捕捉骨骼的静止/姿态旋转和位置，并将其另存为逐骨架的已保存姿态。BSW算法为每个已保存的姿态（旋转+可选位移）计算单个浮点值，并将其写入空物体数据或者根据JSON应用驱动。",
-    "category": "动画",
+    "location": "3D View > Sidebar > BPW",
+    "description": "Bone Pose Weight captures the rest/pose rotation and location of bones and saves them as per-skeleton saved poses. The BPW algorithm calculates a single floating-point value for each saved pose (rotation + optional translation) and writes it to Empty object data or applies it as a driver based on JSON configuration.",
+    "category": "Animation",
 }
 
 import bpy
@@ -19,6 +19,7 @@ from . import ui
 from . import handlers
 from . import driver_math
 from . import driver_operators
+from . import translations
 
 classes = (
     props.PSDSavedPose,
@@ -26,6 +27,8 @@ classes = (
     props.PSDBoneTrigger,
     props.PSDShapeDriverFile,
     props.PSDPoseDriverFile,
+    props.PSDBoneRBFRow,
+    props.PSDBoneRBFData,
     ui.PSD_UL_BonePair,
     ui.PSD_UL_SavedPose,
     ui.PSD_UL_BoneTrigger,
@@ -65,6 +68,14 @@ classes = (
     operators.PSD_OT_unregister_cache_empty_ui,
     operators.PSDApplySavePose,
     operators.PSDCapturePose,
+    operators.PSD_OT_MirrorBoneFilter,
+    operators.PSD_OT_SyncMirrorData,
+    operators.PSD_OT_ToggleAllFilterDetails,
+    operators.PSD_OT_CopyPath,
+    operators.PSD_OT_UpdateRBFSolver,
+    operators.PSD_OT_EntriesToShapeKey,
+    operators.PSD_OT_ShapeKeyDriver,
+    operators.PSD_OT_RemoveAllBonePairs,
     driver_operators.PSD_OT_BindDriverToCache,
     driver_operators.PSD_OT_BatchBindAll,
     driver_operators.PSD_OT_RemoveDriverFromCache,
@@ -72,20 +83,27 @@ classes = (
     driver_operators.PSD_OT_RefreshDrivers,
     driver_operators.PSD_OT_MuteDrivers,
     driver_operators.PSD_OT_UnmuteDrivers,
+    driver_operators.PSD_OT_BindTriggerDriver,
+    driver_operators.PSD_OT_RemoveTriggerDriver,
     handlers.PSDStartOperator,
     handlers.PSDStopOperator,
 )
+
+
+
 
 def register():
 
 
 
+    translations.register()
 
     bpy.types.Scene.psd_cache_empty = bpy.props.PointerProperty(
         name="PSD Cache Empty",
-        description="选择用于 PSD 缓存的 Empty（必须是 Empty 类型）",
+        description="Select an Empty object for PSD caching (must be of type Empty).",
         type=bpy.types.Object
     )
+    
 
     for cls in classes:
         bpy.utils.register_class(cls)
@@ -100,7 +118,19 @@ def register():
     # 其他初始化（如核心变量，如果需要）
     core.init_globals()  # 如果 core.py 有初始化函数
 
+    driver_math.register_drivers(None)  # 注册驱动函数到命名空间
+    # bpy.app.handlers.load_post.append(driver_math.register_drivers)  # 确保在文件加载后注册驱动函数
+    if driver_math.ensure_drivers_pre not in bpy.app.handlers.depsgraph_update_pre:
+        bpy.app.handlers.depsgraph_update_pre.append(driver_math.ensure_drivers_pre)
+
+    # 3. 在文件加载完成后，自动执行“清空再填回”强制唤醒
+    if driver_math.register_drivers not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(driver_math.register_drivers)
+
+
 def unregister():
+
+    translations.unregister()
 
     del bpy.types.Scene.psd_cache_empty
     # 注销处理器（从 handlers.py 调用）
@@ -109,6 +139,13 @@ def unregister():
     # 注销属性（从 props.py 调用）
     props.unregister_props()
     
+    # bpy.app.handlers.load_post.remove(driver_math.register_drivers)  # 移除
+    if driver_math.ensure_drivers_pre in bpy.app.handlers.depsgraph_update_pre:
+        bpy.app.handlers.depsgraph_update_pre.remove(driver_math.ensure_drivers_pre)
+
+    if driver_math.register_drivers in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(driver_math.register_drivers)
+
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 

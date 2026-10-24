@@ -13,7 +13,31 @@ PREFIX_RESULT_SCA = "psd_sca_"
 # 内存缓存：{ arm_key -> { key_str -> float_value, ... }, ... }
 _psd_results_cache = {}
 
+# 设为 True 后，控制台会详细记录每一次写入尝试
+BPW_DEBUG_MODE = True 
+
+def bpw_log(msg):
+    if BPW_DEBUG_MODE:
+        print(f"[BPW_DEBUG] {msg}")
+
 #======================================================================
+#存储系数
+def save_rbf_matrix(arm_obj, bone_name, matrix_lambda):
+    # 找到或创建该骨骼的存储空间
+    storage = arm_obj.psd_rbf_storage
+    bone_data = storage.get(bone_name) or storage.add()
+    bone_data.bone_name = bone_name
+    bone_data.coeffs.clear()
+    
+    for row in matrix_lambda:
+        new_row = bone_data.coeffs.add()
+        # 将 [1.2, -0.5, ...] 转为 "1.2,-0.5"
+        new_row.values = ",".join([str(v) for v in row])
+    
+    bone_data.sample_count = len(matrix_lambda)
+
+
+
 #UI
 def update_direct_channel(self, context):
     """当切换直接通道模式时，自动处理参与计算开关"""
@@ -123,6 +147,41 @@ def psd_get_registered_empty(obj_arm: bpy.types.Object):
         return None
     return bpy.data.objects.get(name)
 
+# def psd_get_registered_empty(obj_arm: bpy.types.Object):
+#     """
+#     改进版：直接从物体的数据块句柄访问属性，避免二次查找。
+#     """
+#     # 1. 基础校验
+#     if not obj_arm or not obj_arm.data:
+#         return None
+    
+#     # 2. 直接访问 obj_arm.data 这个 IDProperty 容器
+#     # obj_arm.data 永远指向该物体当前使用的原始数据块
+#     arm_data = obj_arm.data
+    
+#     # 3. 尝试获取属性（添加类型检查）
+#     name = arm_data.get(_PSD_CACHE_OBJ_PROP)
+    
+#     # 如果 .get() 拿不到，尝试直接键值访问（有时 .get 在 5.x 某些情况下会失效）
+#     if not name:
+#         if _PSD_CACHE_OBJ_PROP in arm_data:
+#             name = arm_data[_PSD_CACHE_OBJ_PROP]
+            
+#     if not name or not isinstance(name, str):
+#         return None
+    
+#     # 4. 从全局数据中获取物体
+#     target_empty = bpy.data.objects.get(name)
+
+#     print(f"DEBUG: Arm '{obj_arm.name}' 查找 Empty 结果: {name} -> {target_empty}")
+    
+#     # 5. 【关键】确保返回的是 original 原始数据块
+#     # 这样在 psd_flush_mem_to_registered_empty 里写入时，才有修改权
+#     if target_empty and hasattr(target_empty, "original"):
+#         return target_empty.original
+            
+#     return target_empty
+
 def _sync_cache_from_empty(arm_key, empty_obj):
     """从 Empty 对象将驱动器计算出的实时结果拉回到 Python 缓存"""
     if arm_key not in _psd_results_cache:
@@ -200,52 +259,103 @@ def psd_flush_mem_to_array_optimized(obj_arm, verbose=False) -> bool:
 
 #=====================================================
 
+
+
 def psd_flush_mem_to_registered_empty(obj_arm: bpy.types.Object, verbose=False) -> bool:
     """
-    把当前内存缓存（_psd_results_cache）批量写回到已注册 Empty（一次性批量写入）。
-    返回 True 如果有写入发生。
+    将内存缓存中的计算结果批量同步到绑定的 Empty 对象中。
+    通过差异比对（Dirty Checking）减少不必要的属性覆写，从而降低 DepsGraph 刷新压力。
     """
     try:
         arm_key = _arm_key_for_obj(obj_arm)
         mem = _psd_results_cache.get(arm_key)
+        
         if not mem:
             return False
 
         cache_obj = psd_get_registered_empty(obj_arm)
         if cache_obj is None:
-            if verbose:
-                print("[PSD] flush failed: 未注册缓存 Empty")
             return False
 
-        # 收集实际变化的属性（优化：只写变化的）
-        changes = {}
+        is_dirty = False
+        
         for k, v in mem.items():
-            fv = float(v)
-            prev = cache_obj.get(k, None)
-            if prev is None or abs(prev - fv) > 0.001:
-                changes[k] = fv
-
-        if not changes:
-            return False  # 无变化，直接返回
-
-        # 批量赋值（仍是循环，但这是最快方式）
-        for k, v in changes.items():
-            cache_obj[k] = v
-
-        # 只在有变化时 tag（关键！减少 depsgraph 触发）
-        try:
+            # 1. 键名长度安全处理 (Blender 自定义属性键名上限为 63 字符)
+            final_key = str(k)
+            if len(final_key) > 63:
+                if verbose:
+                    print(f"[BPW WARNING] Key truncated (>{len(final_key)}): {final_key}")
+                final_key = final_key[:63]
+            
+            # 2. 差异检测 (Dirty Check)
+            new_val = float(v)
+            old_val = cache_obj.get(final_key)
+            
+            # 仅当值不存在，或者差异大于阈值 (1e-4) 时才进行写入
+            if old_val is None or abs(old_val - new_val) > 1e-4:
+                try:
+                    cache_obj[final_key] = new_val
+                    is_dirty = True
+                except Exception as e:
+                    print(f"[BPW ERROR] Failed to write key '{final_key}': {e}")
+        
+        # 3. 仅在有实际数据变更时才通知 Blender 刷新依赖图
+        if is_dirty:
             cache_obj.update_tag()
-        except Exception as e:
-            if verbose:
-                print("[PSD] cache_obj.update_tag() 失败:", e)
-
-        if verbose:
-            print(f"[PSD] 已把内存缓存写回 Empty '{cache_obj.name}'（实际写入 {len(changes)} 条）")
-
-        return True
+            return True
+            
+        return False
+        
     except Exception as e:
-        if verbose:
-            print("[PSD] psd_flush_mem_to_registered_empty 错误:", e)
+        print(f"[BPW CRITICAL] Flush operation failed for {obj_arm.name}: {e}")
+        return False
+
+# def psd_flush_mem_to_registered_empty(obj_arm: bpy.types.Object, verbose=False) -> bool:
+#     """
+#     把当前内存缓存（_psd_results_cache）批量写回到已注册 Empty（一次性批量写入）。
+#     返回 True 如果有写入发生。
+#     """
+#     try:
+#         arm_key = _arm_key_for_obj(obj_arm)
+#         mem = _psd_results_cache.get(arm_key)
+#         if not mem:
+#             return False
+
+#         cache_obj = psd_get_registered_empty(obj_arm)
+#         if cache_obj is None:
+#             if verbose:
+#                 print("[PSD] flush failed: 未注册缓存 Empty")
+#             return False
+
+#         # 收集实际变化的属性（优化：只写变化的）
+#         changes = {}
+#         for k, v in mem.items():
+#             fv = float(v)
+#             prev = cache_obj.get(k, None)
+#             if prev is None or abs(prev - fv) > 0.001:
+#                 changes[k] = fv
+
+#         if not changes:
+#             return False  # 无变化，直接返回
+
+#         # 批量赋值（仍是循环，但这是最快方式）
+#         for k, v in changes.items():
+#             cache_obj[k] = v
+
+#         # 只在有变化时 tag（关键！减少 depsgraph 触发）
+#         try:
+#             cache_obj.update_tag()
+#         except Exception as e:
+#             if verbose:
+#                 print("[PSD] cache_obj.update_tag() 失败:", e)
+
+#         if verbose:
+#             print(f"[PSD] 已把内存缓存写回 Empty '{cache_obj.name}'（实际写入 {len(changes)} 条）")
+
+#         return True
+#     except Exception as e:
+#         if verbose:
+#             print("[PSD] psd_flush_mem_to_registered_empty 错误:", e)
         return False
 
 #========获取当前选择条目的weight缓存结果==========

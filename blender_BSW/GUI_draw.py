@@ -7,6 +7,7 @@ from gpu_extras.batch import batch_for_shader
 
 _draw_handler = None
 _shader = gpu.shader.from_builtin('POLYLINE_UNIFORM_COLOR')
+_UNIT_RAY_VERTS = [Vector((0, 0, 0)), Vector((0, 1, 0))]
 
 # 预生成球体线框数据，避免每帧重复计算
 def generate_sphere_wireframe(segments=16, rings=8):
@@ -100,74 +101,72 @@ def _generate_cone_geometry(angle_deg, axis='Y', length=0.5, segments=32):
     
     return draw_verts
 
-def _generate_spherical_sector_geometry(angle_deg, axis='Y', length=0.5, segments=32):
+def _generate_spherical_sector_geometry(angle_deg, axis='Y', length=0.5, segments=32, scales=(1.0, 1.0, 1.0)):
     """
-    生成球扇形线框 (Spherical Sector)
-    支持 0 到 180 度，解决圆锥在 90 度时的塌陷问题
+    生成支持非均匀缩放的球扇形线框
+    scales: (sx, sy, sz)
     """
     angle_rad = math.radians(angle_deg)
-    # 限制极小值防止奇点，上限可以到 180
     angle_rad = max(0.01, min(math.pi, angle_rad))
     
     draw_verts = []
     apex = Vector((0, 0, 0))
     
-    # 1. 生成基础旋转矩阵 (对齐轴向)
-    # 默认计算是在 +Y 方向进行的
+    # 1. 基础旋转矩阵 (对齐轴向)
     rot_mat = Matrix.Identity(3)
     if axis == 'X':
         rot_mat = Euler((0, 0, math.radians(-90)), 'XYZ').to_matrix()
     elif axis == 'Z':
         rot_mat = Euler((math.radians(90), 0, 0), 'XYZ').to_matrix()
 
-    # 2. 生成底部的“纬线”圆环 (The Ring at the edge of the sector)
-    # 这个环代表了衰减的最远边界
+    # --- 新增：构造缩放矩阵 ---
+    # 注意：这里的缩放是在旋转之后应用的，以确保缩放轴与 cone_axis 对齐
+    scale_mat = Matrix.Diagonal(Vector(scales)).to_3x3()
+    # 最终变换矩阵 (局部)
+    combined_mat = scale_mat @ rot_mat
+
+    # 2. 生成底部的圆环
     ring_radius = length * math.sin(angle_rad)
     ring_height = length * math.cos(angle_rad)
     
     ring_points = []
     for i in range(segments):
         theta = 2.0 * math.pi * i / segments
-        # 在 XZ 平面上生成，高度在 Y
         p = Vector((ring_radius * math.cos(theta), ring_height, ring_radius * math.sin(theta)))
-        ring_points.append(rot_mat @ p)
+        # 应用旋转和缩放
+        ring_points.append(combined_mat @ p)
 
     # 绘制圆环封闭线
     for i in range(segments):
         draw_verts.append(ring_points[i])
         draw_verts.append(ring_points[(i + 1) % segments])
 
-    # 3. 生成从顶点到圆环的“经线” (Radiating Lines)
+    # 3. 生成经线 (Radiating Lines)
     radial_steps = 8 
     for i in range(radial_steps):
         theta = 2.0 * math.pi * i / radial_steps
-        # 如果角度 <= 90, 连直线即可 (圆锥边)
-        # 如果角度 > 90, 连曲线（弧线）会更好看，但直线最节省性能
         target_p = Vector((ring_radius * math.cos(theta), ring_height, ring_radius * math.sin(theta)))
         draw_verts.append(apex)
-        draw_verts.append(rot_mat @ target_p)
+        draw_verts.append(combined_mat @ target_p)
 
-    # 4. 特殊处理：当角度 > 90 度时，增加“侧边弧线”增强立体感
-    # 否则看起来会像一个被切掉底部的球，很难分辨方向
+    # 4. 侧边弧线 (支持非均匀缩放后，弧线会变成椭圆弧)
     if angle_deg > 59:
-        # 增加一根过轴心的纵向圆弧 (这里生成 4 根主要的弧线)
         arc_segments = 16
-        for r in [0, math.pi/1]: # 两个垂直平面
+        for r in [0, math.pi/2, math.pi, math.pi*1.5]: 
             last_p = None
             for s in range(arc_segments + 1):
-                # t 从 0 扫到 angle_rad
                 t = angle_rad * s / arc_segments
                 p = Vector((length * math.sin(t) * math.cos(r), 
                             length * math.cos(t), 
                             length * math.sin(t) * math.sin(r)))
-                curr_p = rot_mat @ p
+                curr_p = combined_mat @ p
                 if last_p:
                     draw_verts.append(last_p)
                     draw_verts.append(curr_p)
                 last_p = curr_p
 
-    # 5. 轴心线 (可选，明确指向)
-    center_end = rot_mat @ Vector((0, length, 0))
+    # 5. 轴心线
+    center_end = combined_mat @ Vector((0, length, 0))
     draw_verts.append(apex)
     draw_verts.append(center_end)
 
@@ -176,6 +175,9 @@ def _generate_spherical_sector_geometry(angle_deg, axis='Y', length=0.5, segment
 
 
 def draw_psd_visualizers():
+
+    # gpu.matrix.reset()
+
     context = bpy.context
     scene = context.scene
     if not getattr(scene, "psd_show_saved_poses", True):
@@ -185,15 +187,19 @@ def draw_psd_visualizers():
     if not obj or obj.type != 'ARMATURE':
         return
 
+    obj_scale = (obj.scale[0] + obj.scale[1] + obj.scale[2]) / 3.0
+
     # 1. 在循环外获取一次缓存，避免重复计算指针和查找字典
     from .utils import _arm_key_for_obj, _safe_name, PREFIX_RESULT, PREFIX_RESULT_LOC
     arm_key = _arm_key_for_obj(obj)
     arm_cache = _psd_results_cache.get(arm_key, {})
 
-    gpu.state.line_width_set(1.0)      # 默认设为 1，避免继承大线宽
-    gpu.state.depth_test_set('LESS')   # 开启深度测试，解决遮挡混乱
-    gpu.state.blend_set('ALPHA')       # 确保透明度有效
+    gpu.state.depth_test_set('ALWAYS')     # 关键：设置为 ALWAYS，无论深度如何都绘制
+    gpu.state.depth_mask_set(False)
+    gpu.state.blend_set('ALPHA')        # 开启透明混合
+    gpu.state.line_width_set(1.0)       # 强制重置线宽
 
+    
     _shader.bind()
 
     obj_mat_world = obj.matrix_world  # 缓存矩阵引用
@@ -232,7 +238,9 @@ def draw_psd_visualizers():
             
             _shader.uniform_float("lineWidth", 1.0)
             _shader.uniform_float("color", (r_trig, gb_trig, 1.0, 0.6)) # 加上蓝色通道区分触发器和普通位置球
+
             trig_batch.draw(_shader)
+
     # =========================================================================
     for entry in obj.psd_saved_poses:
         pb = obj.pose.bones.get(entry.bone_name)
@@ -262,7 +270,7 @@ def draw_psd_visualizers():
             target_world_pos = obj_mat_world @ (base_model_mat @ target_local_offset)
 
             # 绘制球体
-            sphere_mat = Matrix.Translation(target_world_pos) @ Matrix.Scale(entry.loc_radius, 4)
+            sphere_mat = Matrix.Translation(target_world_pos) @ Matrix.Scale(entry.loc_radius * obj_scale, 4)
             v_sphere = [sphere_mat @ v for v in SPHERE_VERTS]
             
             # 注意：频繁创建 batch 比较耗能，如果顶点不变，建议预创建
@@ -272,6 +280,7 @@ def draw_psd_visualizers():
             r_loc = math.sin(loc_w * math.pi / 2)
             gb_loc = math.cos(loc_w * math.pi / 2)
             _shader.uniform_float("color", (r_loc, gb_loc, gb_loc, 0.8))
+
             s_batch.draw(_shader)
 
         # =========================================================================
@@ -288,6 +297,13 @@ def draw_psd_visualizers():
             _shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))
             line_batch.draw(_shader)
 
+            # 获取缩放参数
+            scales = (
+                getattr(entry, 'cone_scale_x', 1.0),
+                getattr(entry, 'cone_scale_y', 1.0),
+                getattr(entry, 'cone_scale_z', 1.0)
+            )
+
             # 构造目标时刻旋转
             target_euler = Euler([math.radians(a) for a in entry.pose_rot], 'XYZ')
             target_local_rot_mat = target_euler.to_matrix().to_4x4()
@@ -302,8 +318,14 @@ def draw_psd_visualizers():
             final_cone_mat.translation = current_head_world
 
             viz_len = pb.length * 0.6 if pb.length > 0 else 0.5
-            verts = _generate_spherical_sector_geometry(entry.cone_angle, entry.cone_axis, length=viz_len)
-            # verts = _generate_cone_geometry(entry.cone_angle, entry.cone_axis, length=viz_len)
+            
+            # --- 调用修改后的几何生成函数，传入 scales ---
+            verts = _generate_spherical_sector_geometry(
+                entry.cone_angle, 
+                entry.cone_axis, 
+                length=viz_len, 
+                scales=scales
+            )
             
             world_verts = [final_cone_mat @ v for v in verts]
             cone_batch = batch_for_shader(_shader, 'LINES', {"pos": world_verts})
@@ -313,7 +335,70 @@ def draw_psd_visualizers():
             r_rot = math.sin(rot_w * math.pi / 2)
             gb_rot = math.cos(rot_w * math.pi / 2)
             _shader.uniform_float("color", (r_rot, gb_rot, gb_rot, 0.8))
+
             cone_batch.draw(_shader)
+
+    # =========================================================================
+    # 4. 绘制姿态旋转射线丛 (Pose Rotation Rays)
+    # =========================================================================
+        # 1. 它是 Scene 属性，直接在最外层（不要嵌套在圆锥的 if 里面）进行判断！
+    if getattr(context.scene, "show_ray_verts", False):
+        
+        pb = context.active_pose_bone
+        
+        if pb and obj: # 确保当前选了骨骼，且物体存在
+            ray_len = pb.length * 0.6 if pb.length > 0 else 0.5
+
+            # 3. 总闸和骨骼都就位，才进来遍历所有的已保存姿态
+            for sub_entry in obj.psd_saved_poses:
+                # 严格过滤：只有条目属于当前选中的骨骼，才为它发射一条射线
+                if sub_entry.bone_name != pb.name:
+                    continue
+
+                # ---- 接下来是你完全不乱飞的矩阵计算（完全对齐你的圆锥逻辑） ----
+                sub_euler = Euler([math.radians(a) for a in sub_entry.pose_rot], 'XYZ')
+                sub_rot_mat = sub_euler.to_matrix().to_4x4()
+
+                if pb.parent:
+                    mat_relative = pb.parent.bone.matrix_local.inverted() @ pb.bone.matrix_local
+                    model_mat_sub = pb.parent.matrix @ mat_relative @ sub_rot_mat
+                else:
+                    model_mat_sub = pb.bone.matrix_local @ sub_rot_mat
+
+                final_ray_mat = obj_mat_world @ model_mat_sub
+
+                # 变换到世界空间
+                v_start_world = final_ray_mat @ Vector((0.0, 0.0, 0.0))
+                v_end_world = final_ray_mat @ Vector((0.0, ray_len, 0.0))
+
+                final_ray_mat.translation = v_start_world
+
+                # Y轴极值梯度渐变色计算
+                local_y_radians = sub_euler.y 
+                factor = max(0.0, min(1.0, abs(local_y_radians) / math.pi))
+
+                r = 0.1 + 0.9 * factor
+                g = 0.9 - 0.8 * factor
+                b = 0.1
+                alpha = 0.5 + 0.3 * factor 
+
+                # 绘制单条射线
+                single_ray_batch = batch_for_shader(_shader, 'LINES', {"pos": [v_start_world, v_end_world]})
+                _shader.uniform_float("lineWidth", 2.0)
+                _shader.uniform_float("color", (r, g, b, alpha))
+                single_ray_batch.draw(_shader)
+
+                # 绘制末端小球
+                dot_radius = ray_len * 0.05 
+                dot_mat = Matrix.Translation(v_end_world) @ Matrix.Scale(dot_radius, 4)
+                v_dot_sphere = [dot_mat @ v for v in SPHERE_VERTS]
+                
+                dot_batch = batch_for_shader(_shader, 'LINES', {"pos": v_dot_sphere}, indices=SPHERE_INDS)
+                _shader.uniform_float("lineWidth", 2.5)
+                _shader.uniform_float("color", (r, g, b, min(1.0, alpha + 0.2)))
+                dot_batch.draw(_shader)
+
+
 
 
 def register_draw_handler():
